@@ -1,0 +1,8 @@
+module MujocoDDS {
+  struct ControlMsg {
+    unsigned long mode;    // 0 = raw actuator values, 1 = basic motion preset
+    unsigned long action;  // interpretation depends on mode
+    double values[16];
+  };
+};
+
