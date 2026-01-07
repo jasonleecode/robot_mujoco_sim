@@ -21,7 +21,7 @@
 
 namespace {
 
-constexpr char kDefaultModel[] = "model/boston_dynamics_spot/scene.xml";
+constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
 constexpr std::chrono::milliseconds kStepDelay(2);
 constexpr int kControlMsgSlots = 16;
 
