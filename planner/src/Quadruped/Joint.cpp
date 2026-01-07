@@ -63,20 +63,14 @@ double Joint::enforceLim(double estJointAngle)
 {
 	if (estJointAngle < jointLoLim)
 	{
-		std::cout << "Low limit Triggered " << estJointAngle << std::endl;
-		// std::exit(-1);
-		throw 0;
-		estJointAngle = defaultAngle;
-		// estJointAngle = jointAngle;
+		std::cout << "Low limit Triggered " << estJointAngle << " (clamped to " << jointLoLim << ")" << std::endl;
+		estJointAngle = jointLoLim;
 	}
 		
 	else if (estJointAngle > jointUpLim)
 	{
-		std::cout << "Uplimit Triggered " << estJointAngle << std::endl;
-		// std::exit(-1);
-		throw 0;
-		estJointAngle = defaultAngle;
-		// estJointAngle = jointAngle;
+		std::cout << "Uplimit Triggered " << estJointAngle << " (clamped to " << jointUpLim << ")" << std::endl;
+		estJointAngle = jointUpLim;
 	}
 	return estJointAngle;	
 }

@@ -10,7 +10,7 @@
 #define JOINT_H
 
 #include "Quadruped/Link.h"
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
 
 #define LEN_THIGH 0.2130
 #define LEN_HIP 0.0955

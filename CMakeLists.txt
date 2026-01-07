@@ -40,6 +40,9 @@ find_package(OpenCV REQUIRED)
 # 但最好的做法是放在下面的 target_include_directories 中。
 # include_directories(${OpenCV_INCLUDE_DIRS}) 
 
+# === 添加planner子模块 ===
+add_subdirectory(planner)
+
 # === 添加可执行文件 ===
 add_executable(MujocoDDSExample
     src/main.cpp
@@ -74,6 +77,7 @@ target_link_libraries(MujocoDDSExample PRIVATE
     ${MUJOCO_PLATFORM_LIBS} 
     CycloneDDS::ddsc
     ${OpenCV_LIBS}   # <--- 这里是最关键的一步！
+    planner            # Planner模块
 )
 
 if(BUILD_MUJOCO_SAMPLES)

@@ -10,7 +10,7 @@
 #define KINEMATICS_H_
 
 #include <iostream>
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
 
 class Leg;
 
