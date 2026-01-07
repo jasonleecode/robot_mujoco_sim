@@ -1,25 +1,27 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <mujoco/mujoco.h>
-
+#include <opencv2/opencv.hpp>
 #include <dds/dds.h>
 
 #include "ControlActions.hpp"
 #include "RobotSim.hpp"
+#include "planner.h"
 #include "dds_generated/ControlMsg.h"
 
 namespace {
 
-constexpr char kDefaultModel[] = "boston_dynamics_spot/scene.xml";
+constexpr char kDefaultModel[] = "model/boston_dynamics_spot/scene.xml";
 constexpr std::chrono::milliseconds kStepDelay(2);
 constexpr int kControlMsgSlots = 16;
 
@@ -80,16 +82,6 @@ std::string ResolveModelPath(int argc, char** argv) {
     return kDefaultModel;
 }
 
-// Basic sinusoidal control, enough to show actuator wiring works.
-void FillDemoControls(std::vector<double>& ctrl_buffer, double sim_time_s) {
-    constexpr double kAmp = 0.25;
-    constexpr double kFreq = 0.5;  // Hz
-    for (int i = 0; i < static_cast<int>(ctrl_buffer.size()); ++i) {
-        double phase = sim_time_s * kFreq * 2.0 * mjPI + (i * 0.15);
-        ctrl_buffer[i] = kAmp * std::sin(phase);
-    }
-}
-
 void SanityCheckRuntime() {
     std::cout << "MuJoCo version " << mj_versionString() << '\n';
     if (mjVERSION_HEADER != mj_version()) {
@@ -114,9 +106,28 @@ struct ScopedParticipant {
     dds_entity_t handle = DDS_ENTITY_NIL;
 };
 
+struct SharedControlBuffer {
+    std::vector<double> values;
+    std::mutex mutex;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::thread physics_thread;
+    bool physics_started = false;
+    std::atomic<bool> sim_running{false};
+
+    // // 定义 ToF 分辨率
+    // const int tof_width = 320;
+    // const int tof_height = 240;
+    // 定义相机分辨率
+    const int cam_w = 640; // 稍微调大一点看得清楚，或者保持 320
+    const int cam_h = 480;
+    // 数据容器
+    std::vector<unsigned char> rgb_data;
+    std::vector<float> depth_data;
+
     try {
         PrintUsage(argv[0]);
         SanityCheckRuntime();
@@ -143,51 +154,132 @@ int main(int argc, char** argv) {
             RequireOk(dds_create_reader(participant_guard.handle, topic, nullptr, nullptr),
                       "dds_create_reader");
 
-        std::vector<double> control(num_actuators, 0.0);
-        auto t0 = std::chrono::steady_clock::now();
+        SpotPlanner planner;
+        planner.reset();
+        RobotState robot_state;
+        SharedControlBuffer shared_control;
+        shared_control.values.assign(num_actuators, 0.0);
         bool warned_clamp = false;
-        bool remote_override = false;
         MujocoDDS_ControlMsg latest_command{};
+        bool planner_drive = true;   // start with planner standing
+        bool received_remote = false;
+        auto physics_loop = [&]() {
+            std::vector<double> local = shared_control.values;
+            while (sim_running.load(std::memory_order_acquire)) {
+                {
+                    std::lock_guard<std::mutex> lock(shared_control.mutex);
+                    local = shared_control.values;
+                }
+                robot.applyControlVector(local);
+                robot.stepPhysics();
+                //std::this_thread::sleep_for(kStepDelay);
+            }
+        };
 
+        sim_running.store(true, std::memory_order_release);
+        physics_thread = std::thread(physics_loop);
+        physics_started = true;
 
-        while (robot.isWindowOpen()) {
-            const auto now = std::chrono::steady_clock::now();
-            const double sim_time =
-                std::chrono::duration<double>(now - t0).count();
+        while (true) {
             const bool has_command = PollDDSCommands(reader, latest_command);
             if (has_command) {
+                std::lock_guard<std::mutex> lock(shared_control.mutex);
                 if (latest_command.mode ==
                     static_cast<uint32_t>(control::CommandMode::kBasic)) {
                     control::BasicMotion motion;
                     if (control::TryParseBasicMotion(latest_command.action, motion)) {
-                        robot.applyBasicMotion(motion, control);
-                        remote_override = true;
+                        if (motion == control::BasicMotion::kForward ||
+                            motion == control::BasicMotion::kStand) {
+                            planner.setMode(motion);
+                            planner_drive = true;
+                        } else {
+                            robot.applyBasicMotion(motion, shared_control.values);
+                            planner_drive = false;
+                        }
+                        received_remote = true;
                     } else {
                         std::cerr << "Unknown basic motion id: "
                                   << latest_command.action << '\n';
                     }
                 } else {
-                    CopyMessageToControl(latest_command, control, warned_clamp);
-                    remote_override = true;
+                    CopyMessageToControl(latest_command, shared_control.values, warned_clamp);
+                    planner_drive = false;
+                    received_remote = true;
                 }
+            } 
+
+            if (planner_drive) {
+                robot.getState(robot_state);
+                planner.update(robot_state);
+                std::vector<double> qref;
+                planner.getJointTargets(qref);
+                std::lock_guard<std::mutex> lock(shared_control.mutex);
+                shared_control.values.assign(qref.begin(), qref.end());
             }
 
-            if (!remote_override) {
-                FillDemoControls(control, sim_time);
+            // 1. 获取数据
+            robot.getCameraImages("tof_cam", cam_w, cam_h, rgb_data, depth_data);
+
+            // 2. OpenCV 处理与显示
+            if (!rgb_data.empty() && !depth_data.empty()) {
+                // --- 处理 RGB 部分 ---
+                // MuJoCo 的 RGB 是紧凑排列的 R,G,B
+                cv::Mat img_rgb_raw(cam_h, cam_w, CV_8UC3, rgb_data.data());
+                cv::Mat img_rgb_flipped;
+                
+                // MuJoCo 图像原点在左下角，OpenCV 在左上角，所以要沿 X 轴翻转 (code 0)
+                cv::flip(img_rgb_raw, img_rgb_flipped, 0);
+                
+                // MuJoCo 是 RGB 顺序，OpenCV 显示通常默认 BGR，转换一下颜色正常点
+                cv::Mat img_bgr;
+                cv::cvtColor(img_rgb_flipped, img_bgr, cv::COLOR_RGB2BGR);
+
+                // --- 处理 Depth 部分 ---
+                cv::Mat img_depth_raw(cam_h, cam_w, CV_32F, depth_data.data());
+                cv::Mat img_depth_flipped;
+                cv::flip(img_depth_raw, img_depth_flipped, 0);
+
+                // 归一化：将 0~10米 映射到 0~255，便于伪彩色显示
+                cv::Mat img_depth_norm;
+                double max_dist = 10.0; // 超过10米就是最亮
+                // convertTo(输出, 类型, 缩放因子)
+                img_depth_flipped.convertTo(img_depth_norm, CV_8U, 255.0 / max_dist);
+
+                // 伪彩色处理 (把黑白深度图变成彩虹色热力图，方便观察)
+                // 结果也是一个 3 通道的图 (CV_8UC3)
+                cv::Mat img_depth_color;
+                cv::applyColorMap(img_depth_norm, img_depth_color, cv::COLORMAP_JET);
+
+                // --- 拼接 ---
+                // 左边显示深度 (img_depth_color)，右边显示 RGB (img_bgr)
+                cv::Mat combined_view;
+                std::vector<cv::Mat> matrices = {img_depth_color, img_bgr};
+                cv::hconcat(matrices, combined_view);
+
+                // --- 显示 ---
+                cv::imshow("Spot Robot Camera (Left: Depth, Right: RGB)", combined_view);
+                cv::waitKey(1); // 刷新窗口
             }
 
-            for (int i = 0; i < num_actuators; ++i) {
-                robot.setControl(i, control[i]);
+            robot.renderFrame();
+
+            if (robot.windowShouldClose()) {
+                break;
             }
-
-            robot.step();
-
-            // std::this_thread::sleep_for(kStepDelay);
         }
+
+        sim_running.store(false, std::memory_order_release);
+        if (physics_started && physics_thread.joinable()) {
+            physics_thread.join();
+        }
+
+        return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
+        sim_running.store(false, std::memory_order_release);
+        if (physics_started && physics_thread.joinable()) {
+            physics_thread.join();
+        }
         return EXIT_FAILURE;
     }
-
-    return EXIT_SUCCESS;
 }
