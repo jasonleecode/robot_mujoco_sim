@@ -8,3 +8,13 @@ Mac M4
 # build
 cmake --build build
 
+# run
+`
+./build/MujocoDDSExample
+`
+
+open another terminal to run tool
+
+`
+./build/tools/dds_control_client basic / raw
+`
