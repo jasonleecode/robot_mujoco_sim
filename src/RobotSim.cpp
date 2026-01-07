@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -49,28 +50,70 @@ RobotSim::~RobotSim() {
 }
 
 void RobotSim::setControl(int i, double val) {
+    std::lock_guard<std::mutex> lock(sim_mutex);
     if (m && i >= 0 && i < m->nu) {
         d->ctrl[i] = val;
     }
 }
 
-void RobotSim::step() {
+void RobotSim::stepPhysics() {
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    if (!m || !d) {
+        return;
+    }
     mj_step(m, d);
+}
 
-    if (window && !glfwWindowShouldClose(window)) {
-        mjrRect viewport = {0, 0, 0, 0};
-        glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
-        
-        mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
-        mjr_render(viewport, &scn, &con);
-        
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+void RobotSim::renderFrame() {
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    if (!window || glfwWindowShouldClose(window)) {
+        return;
+    }
+
+    mjrRect viewport = {0, 0, 0, 0};
+    glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
+
+    mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
+    mjr_render(viewport, &scn, &con);
+
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+}
+
+void RobotSim::applyControlVector(const std::vector<double>& control) {
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    if (!m || !d) {
+        return;
+    }
+    const int count = std::min(static_cast<int>(control.size()), m->nu);
+    for (int i = 0; i < count; ++i) {
+        d->ctrl[i] = control[i];
+    }
+    for (int i = count; i < m->nu; ++i) {
+        d->ctrl[i] = 0.0;
+    }
+}
+
+void RobotSim::getState(RobotState& state) const {
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    state.time = d ? d->time : 0.0;
+    if (d && m) {
+        state.qpos.assign(d->qpos, d->qpos + m->nq);
+        state.qvel.assign(d->qvel, d->qvel + m->nv);
+    } else {
+        state.qpos.clear();
+        state.qvel.clear();
     }
 }
 
 bool RobotSim::isWindowOpen() const {
+    std::lock_guard<std::mutex> lock(sim_mutex);
     return window && !glfwWindowShouldClose(window);
+}
+
+bool RobotSim::windowShouldClose() const {
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    return !window || glfwWindowShouldClose(window);
 }
 
 // 鼠标按键回调
@@ -192,5 +235,59 @@ void RobotSim::applyBasicMotion(control::BasicMotion motion, std::vector<double>
         case control::BasicMotion::kCount:
         default:
             break;
+    }
+}
+
+// 辅助函数：将 MuJoCo 的 Z-buffer (0-1) 转换为真实距离 (米)
+float zbuffer_to_meters(float depth_val, float znear, float zfar) {
+    // MuJoCo 使用逆深度映射，通常公式如下：
+    // 这里的公式取决于 MuJoCo 的具体版本和配置，通常如下：
+    return znear / (1.0f - depth_val * (1.0f - znear / zfar));
+}
+
+void RobotSim::getCameraImages(const std::string& camera_name, int width, int height, 
+                               std::vector<unsigned char>& rgb_output, 
+                               std::vector<float>& depth_output) {
+    // 1. 找到相机 ID
+    int cam_id = mj_name2id(m, mjOBJ_CAMERA, camera_name.c_str());
+    if (cam_id == -1) {
+        // 防止疯狂报错，稍微节制一点，或者直接返回
+        return; 
+    }
+
+    // 2. 设置虚拟相机视角
+    mjvCamera cam;
+    mjv_defaultCamera(&cam);
+    cam.type = mjCAMERA_FIXED;
+    cam.fixedcamid = cam_id;
+
+    // 3. 更新场景
+    mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
+
+    // 4. 设置视口
+    mjrRect viewport = {0, 0, width, height};
+
+    // 5. 渲染 (如果不想闪烁，这里最好是用离屏 Context，但为了简单先这样)
+    mjr_render(viewport, &scn, &con);
+
+    // 6. 准备容器
+    // RGB 需要 3 个通道 (R, G, B)
+    rgb_output.resize(width * height * 3);
+    // Depth 需要 1 个通道
+    depth_output.resize(width * height);
+
+    // 7. 读取像素 (这是核心改动：同时读取 RGB 和 Depth)
+    // mjr_readPixels 参数顺序: rgb, depth, viewport, context
+    mjr_readPixels(rgb_output.data(), depth_output.data(), viewport, &con);
+
+    // 8. 深度线性化处理 (Z-Buffer -> Meters)
+    float znear = m->vis.map.znear;
+    float zfar = m->vis.map.zfar;
+    // 注意：MuJoCo 的 readPixels 出来的深度已经在 0-1 之间了，但需要线性化
+    // 为了性能，这里我们先不在这里做循环转换，改到 main.cpp 里用 OpenCV 批量处理，
+    // 或者如果你想保持在这里转换也可以。为了代码清晰，这里只返回原始 Z-buffer 也没问题，
+    // 但为了兼容你之前的逻辑，我们还是转成米吧。
+    for (size_t i = 0; i < depth_output.size(); ++i) {
+        depth_output[i] = zbuffer_to_meters(depth_output[i], znear, zfar);
     }
 }
