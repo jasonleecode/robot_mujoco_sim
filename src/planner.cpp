@@ -154,7 +154,20 @@ void SpotPlanner::getJointTargets(std::vector<double>& qref) {
         return;
     }
 
-    // 是否处于前进模式
+    // --- 步骤 A: 更新 Robot Model 到当前真实状态 (关键修复) ---
+    // 必须用真实关节角度更新 robot_model，否则计算出的 delta 永远是错的
+    if (has_current_state_ && current_state_.qpos.size() >= kMuJoCoJointStartIdx + kNumJoints) {
+        std::vector<double> current_spot_angles(kNumJoints);
+        for(int i = 0; i < kNumJoints; ++i) {
+            current_spot_angles[i] = current_state_.qpos[kMuJoCoJointStartIdx + i];
+        }
+        // 转换为 Robot 类需要的顺序 (FR, FL, RR, RL)
+        std::vector<double> current_robot_angles = convertToRobotOrder(current_spot_angles);
+        robot_model_->setAngles(current_robot_angles);
+    }
+    // ------------------------------------------------
+
+    // --- 恢复被省略的参数定义 ---
     bool is_forward = (mode_ == control::BasicMotion::kForward);
     
     // 转向因子
@@ -169,16 +182,15 @@ void SpotPlanner::getJointTargets(std::vector<double>& qref) {
     double base_stride_x = is_forward ? 0.08 : 0.0; // 基础前进步幅（米）
     double stride_x = base_stride_x * speed_multiplier_;
     double lift_h = 0.05 * speed_multiplier_; // 抬腿高度（米）
+    // -------------------------
 
     // 对每条腿计算足端轨迹并使用逆运动学
     for (int leg = 0; leg < 4; ++leg) {
         int idx = leg * 3;
         double leg_phase = std::fmod(phase_ + offsets[leg], 1.0);
         
-        // 获取标准站立位置的足端位置
+        // 1. 计算【理想】的目标足端位置 (Hip Frame)
         Eigen::Vector3d base_foot_pos = stand_foot_positions_[leg];
-        
-        // 计算足端轨迹偏移
         Eigen::Vector3d foot_offset(0, 0, 0);
         
         // 前后摆动（X方向）
@@ -193,40 +205,47 @@ void SpotPlanner::getJointTargets(std::vector<double>& qref) {
         double side_sign = (leg == 0 || leg == 2) ? 1.0 : -1.0; // 左侧为正
         foot_offset.y() = turn_factor * side_sign * 0.02;
         
-        // 目标足端位置
+        // 目标足端位置（理想）
         Eigen::Vector3d target_foot_pos = base_foot_pos + foot_offset;
         
-        // 获取当前关节角度：优先使用实际机器人状态，否则使用标准站立位置
-        // 注意：MuJoCo的qpos前7个是body位置和四元数，关节角度从索引7开始
-        // MuJoCo顺序：FL, FR, HL(RL), HR(RR) - 与SpotPlanner内部顺序一致（HL=RL, HR=RR）
+        // --- 步骤 B: 获取【实际】当前足端位置 ---
+        Eigen::Vector3d actual_current_foot_pos;
+        // SpotPlanner leg order: 0=FL, 1=FR, 2=RL, 3=RR
+        switch(leg) {
+            case 0: actual_current_foot_pos = robot_model_->getPosition_FL(); break;
+            case 1: actual_current_foot_pos = robot_model_->getPosition_FR(); break;
+            case 2: actual_current_foot_pos = robot_model_->getPosition_RL(); break;
+            case 3: actual_current_foot_pos = robot_model_->getPosition_RR(); break;
+        }
+
+        // --- 步骤 C: 计算修正后的 Delta ---
+        // 这里的 Delta 代表：从"当前实际位置"需要移动多少才能到达"目标位置"
+        Eigen::Vector3d correction_delta = target_foot_pos - actual_current_foot_pos;
+        
+        // 准备当前关节角度用于 IK 种子
         Eigen::Vector3d current_angles;
-        if (has_current_state_ && current_state_.qpos.size() >= kMuJoCoJointStartIdx + kNumJoints) {
-            // 使用实际机器人状态（MuJoCo顺序与SpotPlanner内部顺序一致）
+        if (has_current_state_) {
             int mujoco_idx = kMuJoCoJointStartIdx + idx;
-            current_angles[0] = current_state_.qpos[mujoco_idx];     // HX
-            current_angles[1] = current_state_.qpos[mujoco_idx + 1]; // HY
-            current_angles[2] = current_state_.qpos[mujoco_idx + 2]; // KN
+            current_angles[0] = current_state_.qpos[mujoco_idx];
+            current_angles[1] = current_state_.qpos[mujoco_idx + 1];
+            current_angles[2] = current_state_.qpos[mujoco_idx + 2];
         } else {
-            // 使用标准站立位置
+            // 如果没有状态，回退到 ideal angles
             current_angles[0] = stand_angles_[idx];
             current_angles[1] = stand_angles_[idx + 1];
             current_angles[2] = stand_angles_[idx + 2];
+            // 这种情况下 delta 也只能用理想值
+            correction_delta = target_foot_pos - base_foot_pos; 
         }
         
-        // 计算足端位置变化量
-        Eigen::Vector3d delta_pos = target_foot_pos - base_foot_pos;
-        
         // 使用逆运动学计算新的关节角度
-        // 注意：需要映射到Robot类的legs数组索引
         int robot_leg_idx = mapLegIndex(leg);
         Leg* robot_leg = robot_model_->legs[robot_leg_idx];
         
-        // 使用运动学模型的逆运动学求解（基于当前实际角度）
+        // 传入修正后的 Delta
         Eigen::Vector3d new_angles = robot_leg->getKinematics()->jointAngleCompute(
-            current_angles, delta_pos
+            current_angles, correction_delta
         );
-        
-        // 注意：jointAngleCompute内部已经应用了关节限制，所以这里不需要再次调用
         
         // 设置到输出向量
         qref[idx] = new_angles[0];     // HX

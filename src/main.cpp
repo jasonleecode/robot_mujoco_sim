@@ -19,6 +19,12 @@
 #include "planner.h"
 #include "dds_generated/ControlMsg.h"
 
+// 在 main.cpp 的全局位置 或 仿真类的成员变量中
+mjvFigure fig_control;         // MuJoCo 图表对象
+float plot_data[2][1000];      // 数据缓存: [0]是目标值, [1]是实际值
+int plot_idx = 0;              // 当前数据索引
+const int kPlotPoints = 1000;  // 窗口显示的采样点数
+
 namespace {
 
 constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
