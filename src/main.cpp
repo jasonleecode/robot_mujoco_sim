@@ -19,17 +19,26 @@
 #include "planner.h"
 #include "dds_generated/ControlMsg.h"
 
-// 在 main.cpp 的全局位置 或 仿真类的成员变量中
-mjvFigure fig_control;         // MuJoCo 图表对象
-float plot_data[2][1000];      // 数据缓存: [0]是目标值, [1]是实际值
-int plot_idx = 0;              // 当前数据索引
-const int kPlotPoints = 1000;  // 窗口显示的采样点数
-
 namespace {
 
 constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
 constexpr std::chrono::milliseconds kStepDelay(2);
 constexpr int kControlMsgSlots = 16;
+
+struct ScopedParticipant {
+    ~ScopedParticipant() {
+        if (handle > 0) {
+            dds_delete(handle);
+        }
+    }
+
+    dds_entity_t handle = DDS_ENTITY_NIL;
+};
+
+struct SharedControlBuffer {
+    std::vector<double> values;
+    std::mutex mutex;
+};
 
 void CopyMessageToControl(const MujocoDDS_ControlMsg& msg,
                           std::vector<double>& control,
@@ -102,37 +111,12 @@ int RequireOk(int value, const char* label) {
     return value;
 }
 
-struct ScopedParticipant {
-    ~ScopedParticipant() {
-        if (handle > 0) {
-            dds_delete(handle);
-        }
-    }
-
-    dds_entity_t handle = DDS_ENTITY_NIL;
-};
-
-struct SharedControlBuffer {
-    std::vector<double> values;
-    std::mutex mutex;
-};
-
 }  // namespace
 
 int main(int argc, char** argv) {
     std::thread physics_thread;
     bool physics_started = false;
     std::atomic<bool> sim_running{false};
-
-    // // 定义 ToF 分辨率
-    // const int tof_width = 320;
-    // const int tof_height = 240;
-    // 定义相机分辨率
-    const int cam_w = 640; // 稍微调大一点看得清楚，或者保持 320
-    const int cam_h = 480;
-    // 数据容器
-    std::vector<unsigned char> rgb_data;
-    std::vector<float> depth_data;
 
     try {
         PrintUsage(argv[0]);
@@ -165,6 +149,7 @@ int main(int argc, char** argv) {
         RobotState robot_state;
         SharedControlBuffer shared_control;
         shared_control.values.assign(num_actuators, 0.0);
+        
         bool warned_clamp = false;
         MujocoDDS_ControlMsg latest_command{};
         bool planner_drive = true;   // start with planner standing
@@ -178,7 +163,6 @@ int main(int argc, char** argv) {
                 }
                 robot.applyControlVector(local);
                 robot.stepPhysics();
-                //std::this_thread::sleep_for(kStepDelay);
             }
         };
 
@@ -221,50 +205,29 @@ int main(int argc, char** argv) {
                 planner.getJointTargets(qref);
                 std::lock_guard<std::mutex> lock(shared_control.mutex);
                 shared_control.values.assign(qref.begin(), qref.end());
-            }
 
-            // 1. 获取数据
-            robot.getCameraImages("tof_cam", cam_w, cam_h, rgb_data, depth_data);
 
-            // 2. OpenCV 处理与显示
-            if (!rgb_data.empty() && !depth_data.empty()) {
-                // --- 处理 RGB 部分 ---
-                // MuJoCo 的 RGB 是紧凑排列的 R,G,B
-                cv::Mat img_rgb_raw(cam_h, cam_w, CV_8UC3, rgb_data.data());
-                cv::Mat img_rgb_flipped;
-                
-                // MuJoCo 图像原点在左下角，OpenCV 在左上角，所以要沿 X 轴翻转 (code 0)
-                cv::flip(img_rgb_raw, img_rgb_flipped, 0);
-                
-                // MuJoCo 是 RGB 顺序，OpenCV 显示通常默认 BGR，转换一下颜色正常点
-                cv::Mat img_bgr;
-                cv::cvtColor(img_rgb_flipped, img_bgr, cv::COLOR_RGB2BGR);
+                if (qref.size() >= 12) {
+                    int p_idx = robot.plot_idx % robot.kPlotPoints;
+                    // 1. 记录四条腿的膝关节目标值 (Target)
+                    robot.plot_data[0][p_idx] = (float)qref[2];  // FR
+                    robot.plot_data[1][p_idx] = (float)qref[5];  // FL
+                    robot.plot_data[2][p_idx] = (float)qref[8];  // RR
+                    robot.plot_data[3][p_idx] = (float)qref[11]; // RL
+                    robot.plot_idx++;
 
-                // --- 处理 Depth 部分 ---
-                cv::Mat img_depth_raw(cam_h, cam_w, CV_32F, depth_data.data());
-                cv::Mat img_depth_flipped;
-                cv::flip(img_depth_raw, img_depth_flipped, 0);
-
-                // 归一化：将 0~10米 映射到 0~255，便于伪彩色显示
-                cv::Mat img_depth_norm;
-                double max_dist = 10.0; // 超过10米就是最亮
-                // convertTo(输出, 类型, 缩放因子)
-                img_depth_flipped.convertTo(img_depth_norm, CV_8U, 255.0 / max_dist);
-
-                // 伪彩色处理 (把黑白深度图变成彩虹色热力图，方便观察)
-                // 结果也是一个 3 通道的图 (CV_8UC3)
-                cv::Mat img_depth_color;
-                cv::applyColorMap(img_depth_norm, img_depth_color, cv::COLORMAP_JET);
-
-                // --- 拼接 ---
-                // 左边显示深度 (img_depth_color)，右边显示 RGB (img_bgr)
-                cv::Mat combined_view;
-                std::vector<cv::Mat> matrices = {img_depth_color, img_bgr};
-                cv::hconcat(matrices, combined_view);
-
-                // --- 显示 ---
-                cv::imshow("Spot Robot Camera (Left: Depth, Right: RGB)", combined_view);
-                cv::waitKey(1); // 刷新窗口
+                    // 2. 将数据填入 mjvFigure 的线性缓冲区
+                    for (int k = 0; k < robot.kPlotPoints; k++) {
+                        int history_idx = (robot.plot_idx + k) % robot.kPlotPoints; 
+                        
+                        // 遍历 4 条线
+                        for (int line = 0; line < 4; ++line) {
+                            // 偶数位存 x (时间/索引)，奇数位存 y (数值)
+                            robot.fig.linedata[line][2*k]   = (float)k;
+                            robot.fig.linedata[line][2*k+1] = robot.plot_data[line][history_idx];
+                        }
+                    }
+                }
             }
 
             robot.renderFrame();
@@ -274,6 +237,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        // 清理退出
         sim_running.store(false, std::memory_order_release);
         if (physics_started && physics_thread.joinable()) {
             physics_thread.join();

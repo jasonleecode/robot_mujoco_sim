@@ -34,6 +34,7 @@ open another terminal to run tool
 
 # ToDo  
  - 给Spot增加IMU传感器，让其参与姿态控制
+ - 完善传感器模型，设置FOV
  - 结合ToF传感器，使用OpenVLA来控制机器人姿态
  - 增加多个场景（楼梯、碎石地面、障碍物）
  - 让Planner支持多种型号的机器人
