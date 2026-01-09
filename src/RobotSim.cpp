@@ -6,6 +6,11 @@
 #include <stdexcept>
 #include <vector>
 
+// 速度选项定义
+const float RobotSim::percentRealTime[] = {
+    -1, 100, 80, 66, 50, 40, 33, 25, 20, 16, 13, 10, 8, 6, 5, 4, 3, 2.5, 2, 1.5, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0
+};
+
 RobotSim::RobotSim(const std::string &xml_path) {
     // --- 1. 图表初始化 ---
     mjv_defaultFigure(&fig);
@@ -23,10 +28,10 @@ RobotSim::RobotSim(const std::string &xml_path) {
     strcpy(fig.linename[2], "RR Knee");
     strcpy(fig.linename[3], "RL Knee");
 
-    fig.linergb[0][0]=1.0f; fig.linergb[0][1]=0.1f; fig.linergb[0][2]=0.1f; // 红
-    fig.linergb[1][0]=0.1f; fig.linergb[1][1]=1.0f; fig.linergb[1][2]=0.1f; // 绿
-    fig.linergb[2][0]=0.1f; fig.linergb[2][1]=0.1f; fig.linergb[2][2]=1.0f; // 蓝
-    fig.linergb[3][0]=1.0f; fig.linergb[3][1]=0.8f; fig.linergb[3][2]=0.0f; // 黄
+    fig.linergb[0][0]=1.0f; fig.linergb[0][1]=0.1f; fig.linergb[0][2]=0.1f; 
+    fig.linergb[1][0]=0.1f; fig.linergb[1][1]=1.0f; fig.linergb[1][2]=0.1f; 
+    fig.linergb[2][0]=0.1f; fig.linergb[2][1]=0.1f; fig.linergb[2][2]=1.0f; 
+    fig.linergb[3][0]=1.0f; fig.linergb[3][1]=0.8f; fig.linergb[3][2]=0.0f; 
 
     for(int i=0; i<4; ++i) fig.linepnt[i] = kPlotPoints;
 
@@ -68,135 +73,30 @@ RobotSim::~RobotSim() {
     glfwTerminate();
 }
 
+// 线程安全的设置控制输入
 void RobotSim::setControl(int i, double val) {
     std::lock_guard<std::mutex> lock(sim_mutex);
     if (m && i >= 0 && i < m->nu) d->ctrl[i] = val;
 }
 
+// 物理步进
 void RobotSim::stepPhysics() {
     std::lock_guard<std::mutex> lock(sim_mutex);
     if (!m || !d) return;
     mj_step(m, d);
 }
 
-GLFWwindow* RobotSim::getWindow() const {
-    return window;
-}
-
-// [核心逻辑] 渲染一帧：获取相机 -> 画主场景 -> 画UI
-void RobotSim::renderFrame() {
-    std::lock_guard<std::mutex> lock(sim_mutex);
-    if (!window || glfwWindowShouldClose(window)) return;
-
-    // 1. 获取窗口大小
-    mjrRect viewport = {0, 0, 0, 0};
-    glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
-
-    // 2. 【关键】先获取相机数据
-    // 这会在后台渲染一次 ToF 相机视角，并读取像素到 buffer
-    // 注意：这会改变 scn 的状态，所以必须在画主场景之前做
-    getCameraImages("tof_cam", cam_w, cam_h, cam_rgb_vec, cam_depth_vec);
-
-    // 3. 渲染主场景 (Main View)
-    // 恢复主相机的场景状态
-    mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
-    mjr_render(viewport, &scn, &con);
-
-    
-    // 5. 绘制波形图表 (Bottom-Left)
-    fig_rect.left = 10;
-    fig_rect.bottom = 10;
-    fig_rect.width = viewport.width / 2 - 20; 
-    fig_rect.height = viewport.height / 3;
-    mjr_figure(fig_rect, &fig, &con);
-
-    drawSensorOverlay(viewport);
-
-    // 6. 刷新屏幕
-    glfwSwapBuffers(window);
-    glfwPollEvents();
-}
-
-// [src/RobotSim.cpp]
-
-void RobotSim::drawSensorOverlay(const mjrRect& viewport) {
-    // 定义显示大小和位置
-    int disp_w = viewport.width / 2 - 20;
-    int disp_h = viewport.height / 3; 
-    
-    mjrRect img_rect;
-    img_rect.width = disp_w;
-    img_rect.height = disp_h;
-    img_rect.left = viewport.width - disp_w - 10; 
-    img_rect.bottom = 10; 
-
-    // --- 情况 A: 没有数据 (相机未找到或初始化失败) ---
-    if (cam_rgb_vec.empty() || cam_depth_vec.empty()) {
-        // 创建一个灰色的“无信号”图像 (BGR格式)
-        cv::Mat empty_img(disp_h, disp_w, CV_8UC3, cv::Scalar(50, 50, 50)); // 深灰色背景
-        
-        // 在上面写字 "NO SIGNAL"
-        // 这里的文字是画在图片里的，不是 MuJoCo 的 Overlay 文字
-        cv::putText(empty_img, "NO SIGNAL (Check Camera Name)", 
-                    cv::Point(disp_w/4, disp_h/2), 
-                    cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
-
-        // 转换为 MuJoCo 格式 (BGR -> RGB, Flip)
-        cv::Mat final_overlay;
-        cv::cvtColor(empty_img, final_overlay, cv::COLOR_BGR2RGB); 
-        cv::flip(final_overlay, final_overlay, 0); 
-
-        // 绘制占位图
-        mjr_drawPixels(final_overlay.data, nullptr, img_rect, &con);
-        return;
-    }
-    
-    // 1. 准备原始数据
-    cv::Mat img_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
-    cv::Mat img_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
-    
-    cv::Mat rgb_upright, depth_upright;
-    cv::flip(img_rgb, rgb_upright, 0);   
-    cv::flip(img_depth, depth_upright, 0);
-
-    // 2. 深度图处理
-    cv::Mat depth_norm, depth_color;
-    double max_dist = 10.0;
-    depth_upright.convertTo(depth_norm, CV_8U, 255.0 / max_dist);
-    cv::applyColorMap(depth_norm, depth_color, cv::COLORMAP_JET); 
-
-    // 3. RGB图处理
-    cv::Mat rgb_bgr;
-    cv::cvtColor(rgb_upright, rgb_bgr, cv::COLOR_RGB2BGR);
-
-    // 4. 拼接
-    cv::Mat combined;
-    cv::hconcat(std::vector<cv::Mat>{depth_color, rgb_bgr}, combined);
-
-    // 5. 缩放
-    cv::Mat resized_overlay;
-    cv::resize(combined, resized_overlay, cv::Size(disp_w, disp_h));
-
-    // 6. 最终转换
-    cv::Mat final_overlay;
-    cv::cvtColor(resized_overlay, final_overlay, cv::COLOR_BGR2RGB); 
-    cv::flip(final_overlay, final_overlay, 0); 
-
-    // 7. 绘制
-    mjr_drawPixels(final_overlay.data, nullptr, img_rect, &con);
-    
-    // (可选) 画一个白色边框让它更明显
-    mjr_rectangle(img_rect, 1.0f, 1.0f, 1.0f, 0.0f); // 实心矩形覆盖了... MuJoCo没有画空心矩形的简单API，mjr_drawPixels最直接
-}
-
+// 应用完整的控制向量
 void RobotSim::applyControlVector(const std::vector<double>& control) {
     std::lock_guard<std::mutex> lock(sim_mutex);
     if (!m || !d) return;
     const int count = std::min(static_cast<int>(control.size()), m->nu);
     for (int i = 0; i < count; ++i) d->ctrl[i] = control[i];
+    // 其余补0
     for (int i = count; i < m->nu; ++i) d->ctrl[i] = 0.0;
 }
 
+// 获取状态
 void RobotSim::getState(RobotState& state) const {
     std::lock_guard<std::mutex> lock(sim_mutex);
     state.time = d ? d->time : 0.0;
@@ -209,16 +109,179 @@ void RobotSim::getState(RobotState& state) const {
     }
 }
 
-bool RobotSim::isWindowOpen() const {
+// [核心重构] 渲染帧：锁粒度最小化
+void RobotSim::renderFrame() {
+    if (!window || glfwWindowShouldClose(window)) return;
+
+    mjrRect viewport = {0, 0, 0, 0};
+    glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
+
+    // --- 临界区 1: 访问 mjData 和更新 Scene ---
+    {
+        std::lock_guard<std::mutex> lock(sim_mutex);
+        
+        // 获取相机图像 (这也需要 mjData 来更新 scene_sensor)
+        getCameraImages("tof_cam", cam_w, cam_h, cam_rgb_vec, cam_depth_vec);
+
+        // 更新主场景 (这是 CPU 操作，拷贝 mjData -> mjvScene)
+        mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
+    } 
+    // --- 锁释放：物理线程现在可以继续运行了 ---
+
+    // --- 渲染阶段 (GPU 操作，耗时但无需锁住 mjData) ---
+    mjr_render(viewport, &scn, &con);
+
+    // 绘制图表
+    fig_rect.left = 10;
+    fig_rect.bottom = 10;
+    fig_rect.width = viewport.width / 2 - 20; 
+    fig_rect.height = viewport.height / 3;
+    
+    // 注意：fig 也在物理线程被写入，理论上需要锁。
+    // 但为了不阻塞渲染，且 mjvFigure 的数据通常容忍一帧的撕裂，这里不加重锁。
+    mjr_figure(fig_rect, &fig, &con);
+
+    // 绘制传感器覆盖层
+    drawSensorOverlay(viewport);
+
+    // 刷新屏幕
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+}
+
+// [新增] 线程安全的更新图表数据
+void RobotSim::updatePlotData(const std::vector<double>& qref) {
+    if (qref.size() < 12) return;
+
     std::lock_guard<std::mutex> lock(sim_mutex);
+
+    int p_idx = plot_idx % kPlotPoints;
+    // 记录四个关节的目标值 (Target)
+    // 假设 qref 顺序: 0-2 FR, 3-5 FL, 6-8 RR, 9-11 RL
+    plot_data[0][p_idx] = (float)qref[2];  // FR Knee
+    plot_data[1][p_idx] = (float)qref[5];  // FL Knee
+    plot_data[2][p_idx] = (float)qref[8];  // RR Knee
+    plot_data[3][p_idx] = (float)qref[11]; // RL Knee
+    plot_idx++;
+
+    // 更新 mjvFigure 的线性缓冲区
+    for (int k = 0; k < kPlotPoints; k++) {
+        int history_idx = (plot_idx + k) % kPlotPoints; 
+        for (int line = 0; line < 4; ++line) {
+            fig.linedata[line][2*k]   = (float)k;
+            fig.linedata[line][2*k+1] = plot_data[line][history_idx];
+        }
+    }
+}
+
+// 绘制左上角的传感器画面
+void RobotSim::drawSensorOverlay(const mjrRect& viewport) {
+    // 检查是否有数据
+    if (cam_rgb_vec.empty() || cam_depth_vec.empty()) {
+        // 画一个无信号提示
+        int disp_w = viewport.width / 2 - 20;
+        int disp_h = viewport.height / 3; 
+        mjrRect img_rect = {viewport.width - disp_w - 10, 10, disp_w, disp_h};
+        
+        // 简单画个黑框，不做复杂 OpenCV 操作以防异常
+        return; 
+    }
+    
+    int disp_w = viewport.width / 2 - 20;
+    int disp_h = viewport.height / 3; 
+    mjrRect img_rect;
+    img_rect.width = disp_w;
+    img_rect.height = disp_h;
+    img_rect.left = viewport.width - disp_w - 10; 
+    img_rect.bottom = 10; 
+
+    // OpenCV 处理
+    cv::Mat img_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
+    cv::Mat img_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
+    
+    cv::Mat rgb_upright, depth_upright;
+    cv::flip(img_rgb, rgb_upright, 0);   
+    cv::flip(img_depth, depth_upright, 0);
+
+    cv::Mat depth_norm, depth_color;
+    double max_dist = 10.0;
+    depth_upright.convertTo(depth_norm, CV_8U, 255.0 / max_dist);
+    cv::applyColorMap(depth_norm, depth_color, cv::COLORMAP_JET); 
+
+    cv::Mat rgb_bgr;
+    cv::cvtColor(rgb_upright, rgb_bgr, cv::COLOR_RGB2BGR);
+
+    cv::Mat combined;
+    cv::hconcat(std::vector<cv::Mat>{depth_color, rgb_bgr}, combined);
+
+    cv::Mat resized_overlay;
+    cv::resize(combined, resized_overlay, cv::Size(disp_w, disp_h));
+
+    cv::Mat final_overlay;
+    cv::cvtColor(resized_overlay, final_overlay, cv::COLOR_BGR2RGB); 
+    cv::flip(final_overlay, final_overlay, 0); 
+
+    mjr_drawPixels(final_overlay.data, nullptr, img_rect, &con);
+}
+
+// 辅助函数: 深度缓冲转换
+float zbuffer_to_meters(float depth_val, float znear, float zfar) {
+    return znear / (1.0f - depth_val * (1.0f - znear / zfar));
+}
+
+// 获取相机数据
+void RobotSim::getCameraImages(const std::string& camera_name, int width, int height, 
+                               std::vector<unsigned char>& rgb_output, 
+                               std::vector<float>& depth_output) {
+    // 此函数在 renderFrame 的锁内调用，安全访问 m
+    int cam_id = mj_name2id(m, mjOBJ_CAMERA, camera_name.c_str());
+    if (cam_id == -1) {
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "Warning: Camera '" << camera_name << "' not found.\n";
+            warned = true;
+        }
+        return; 
+    }
+
+    mjvCamera cam_sensor;
+    mjv_defaultCamera(&cam_sensor);
+    cam_sensor.type = mjCAMERA_FIXED;
+    cam_sensor.fixedcamid = cam_id;
+
+    // 更新传感器场景
+    mjv_updateScene(m, d, &opt, NULL, &cam_sensor, mjCAT_ALL, &scn_sensor);
+
+    // 渲染到 Offscreen Buffer
+    mjrRect viewport = {0, 0, width, height};
+    mjr_render(viewport, &scn_sensor, &con);
+
+    // 读取像素
+    rgb_output.resize(width * height * 3);
+    depth_output.resize(width * height);
+    mjr_readPixels(rgb_output.data(), depth_output.data(), viewport, &con);
+
+    // 深度线性化
+    float znear = m->vis.map.znear;
+    float zfar = m->vis.map.zfar;
+    for (size_t i = 0; i < depth_output.size(); ++i) {
+        depth_output[i] = zbuffer_to_meters(depth_output[i], znear, zfar);
+    }
+}
+
+// 窗口状态查询
+bool RobotSim::isWindowOpen() const {
+    // 窗口指针是 GLFW 管理的，不涉及竞争，但也加上锁比较保险，或者假定主线程调用
     return window && !glfwWindowShouldClose(window);
 }
-
 bool RobotSim::windowShouldClose() const {
-    std::lock_guard<std::mutex> lock(sim_mutex);
     return !window || glfwWindowShouldClose(window);
 }
+GLFWwindow* RobotSim::getWindow() const {
+    return window;
+}
 
+// 静态回调
 void RobotSim::mouse_button(GLFWwindow* window, int button, int action, int mods) {
     RobotSim* sim = static_cast<RobotSim*>(glfwGetWindowUserPointer(window));
     if (sim) sim->handle_mouse_button(button, action, mods);
@@ -232,7 +295,7 @@ void RobotSim::scroll(GLFWwindow* window, double xoffset, double yoffset) {
     if (sim) sim->handle_scroll(xoffset, yoffset);
 }
 
-// 辅助函数：判断鼠标是否在图表上
+// 鼠标交互辅助：判断是否在图表上
 static bool is_mouse_over_figure(double x, double y, const mjrRect& r, int win_h) {
     double gl_y = win_h - y; 
     return x >= r.left && x <= r.left + r.width &&
@@ -359,42 +422,11 @@ void RobotSim::applyBasicMotion(control::BasicMotion motion, std::vector<double>
     }
 }
 
-float zbuffer_to_meters(float depth_val, float znear, float zfar) {
-    return znear / (1.0f - depth_val * (1.0f - znear / zfar));
+int RobotSim::getNumActuators() const {
+    return m ? m->nu : 0;
 }
 
-void RobotSim::getCameraImages(const std::string& camera_name, int width, int height, 
-                               std::vector<unsigned char>& rgb_output, 
-                               std::vector<float>& depth_output) {
-    int cam_id = mj_name2id(m, mjOBJ_CAMERA, camera_name.c_str());
-    if (cam_id == -1) {
-        static bool warned = false;
-        if (!warned) {
-            std::cerr << "Warning: Camera '" << camera_name << "' not found in XML! Overlay will not show.\n";
-            warned = true;
-        }
-        return; 
-    }
-
-
-    mjvCamera cam;
-    mjv_defaultCamera(&cam);
-    cam.type = mjCAMERA_FIXED;
-    cam.fixedcamid = cam_id;
-
-    mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn_sensor);
-
-    mjrRect viewport = {0, 0, width, height};
-    mjr_render(viewport, &scn_sensor, &con);
-
-    rgb_output.resize(width * height * 3);
-    depth_output.resize(width * height);
-
-    mjr_readPixels(rgb_output.data(), depth_output.data(), viewport, &con);
-
-    float znear = m->vis.map.znear;
-    float zfar = m->vis.map.zfar;
-    for (size_t i = 0; i < depth_output.size(); ++i) {
-        depth_output[i] = zbuffer_to_meters(depth_output[i], znear, zfar);
-    }
-}
+// 定义初始化UI函数（虽然现在可能没用到，但保持完整性）
+void RobotSim::initializeUI() {}
+void RobotSim::updateInfoText() {}
+void RobotSim::takeScreenshot() {}

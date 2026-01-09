@@ -22,7 +22,8 @@
 namespace {
 
 constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
-constexpr std::chrono::milliseconds kStepDelay(2);
+// 物理循环频率：1000Hz (1ms)
+constexpr double kSimulationDt = 0.001; 
 constexpr int kControlMsgSlots = 16;
 
 struct ScopedParticipant {
@@ -31,26 +32,55 @@ struct ScopedParticipant {
             dds_delete(handle);
         }
     }
-
     dds_entity_t handle = DDS_ENTITY_NIL;
 };
 
-struct SharedControlBuffer {
-    std::vector<double> values;
+// 线程间共享数据结构
+struct SharedControlData {
     std::mutex mutex;
+    
+    // 当前控制模式：true=使用Planner, false=使用DDS原始关节数据
+    bool use_planner = true; 
+    
+    // Planner 模式下的目标动作
+    control::BasicMotion current_motion = control::BasicMotion::kStand;
+    
+    // Raw 模式下的关节数据缓存
+    std::vector<double> raw_values;
+
+    SharedControlData() {
+        raw_values.resize(kControlMsgSlots, 0.0);
+    }
 };
 
-void CopyMessageToControl(const MujocoDDS_ControlMsg& msg,
-                          std::vector<double>& control,
-                          bool& warned_clamp) {
-    const int copy_count = std::min<int>(control.size(), kControlMsgSlots);
-    for (int i = 0; i < copy_count; ++i) {
-        control[i] = msg.values[i];
-    }
-    if (static_cast<int>(control.size()) > kControlMsgSlots && !warned_clamp) {
-        std::cerr << "Warning: DDS ControlMsg supports only " << kControlMsgSlots
-                  << " actuators, clamping from " << control.size() << '\n';
-        warned_clamp = true;
+// 从 DDS 消息更新共享数据 (主线程调用)
+void CopyMessageToShared(const MujocoDDS_ControlMsg& msg,
+                         SharedControlData& shared_data,
+                         bool& warned_clamp) {
+    std::lock_guard<std::mutex> lock(shared_data.mutex);
+    
+    // 如果是 Raw 模式
+    if (msg.mode == static_cast<uint32_t>(control::CommandMode::kRaw)) {
+        shared_data.use_planner = false;
+        const int copy_count = std::min<int>(shared_data.raw_values.size(), kControlMsgSlots);
+        for (int i = 0; i < copy_count; ++i) {
+            shared_data.raw_values[i] = msg.values[i];
+        }
+        if (static_cast<int>(shared_data.raw_values.size()) > kControlMsgSlots && !warned_clamp) {
+            std::cerr << "Warning: DDS ControlMsg supports only " << kControlMsgSlots
+                      << " actuators.\n";
+            warned_clamp = true;
+        }
+    } 
+    // 如果是 Basic Motion 模式
+    else if (msg.mode == static_cast<uint32_t>(control::CommandMode::kBasic)) {
+        control::BasicMotion motion;
+        if (control::TryParseBasicMotion(msg.action, motion)) {
+            shared_data.use_planner = true;
+            shared_data.current_motion = motion;
+        } else {
+            std::cerr << "Unknown basic motion id: " << msg.action << '\n';
+        }
     }
 }
 
@@ -61,8 +91,7 @@ bool PollDDSCommands(dds_entity_t reader, MujocoDDS_ControlMsg& latest_command) 
     bool updated = false;
 
     while (true) {
-        const dds_return_t rc =
-            dds_take(reader, samples, infos, kSamplesPerTake, kSamplesPerTake);
+        const dds_return_t rc = dds_take(reader, samples, infos, kSamplesPerTake, kSamplesPerTake);
         if (rc == 0 || rc == DDS_RETCODE_NO_DATA) {
             break;
         }
@@ -76,24 +105,19 @@ bool PollDDSCommands(dds_entity_t reader, MujocoDDS_ControlMsg& latest_command) 
                 updated = true;
             }
         }
-
         dds_return_loan(reader, samples, rc);
     }
-
     return updated;
 }
 
 void PrintUsage(const char* binary_name) {
     std::cout << "Usage:\n  " << binary_name << " [path/to/model.xml]\n\n"
               << "When no path is provided the default model '" << kDefaultModel
-              << "' is used relative to the repository root.\n";
+              << "' is used.\n";
 }
 
 std::string ResolveModelPath(int argc, char** argv) {
-    if (argc > 1) {
-        return argv[1];
-    }
-
+    if (argc > 1) return argv[1];
     return kDefaultModel;
 }
 
@@ -115,7 +139,6 @@ int RequireOk(int value, const char* label) {
 
 int main(int argc, char** argv) {
     std::thread physics_thread;
-    bool physics_started = false;
     std::atomic<bool> sim_running{false};
 
     try {
@@ -127,109 +150,100 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Model file not found: " + model_path);
         }
 
+        // 初始化 RobotSim
         RobotSim robot(model_path);
         const int num_actuators = robot.getNumActuators();
-        std::cout << "Loaded model '" << model_path << "' with "
-                  << num_actuators << " actuators\n";
+        std::cout << "Loaded model '" << model_path << "' with " << num_actuators << " actuators\n";
 
+        // DDS 初始化
         ScopedParticipant participant_guard;
-        participant_guard.handle =
-            RequireOk(dds_create_participant(DDS_DOMAIN_DEFAULT, nullptr, nullptr),
-                      "dds_create_participant");
-        const dds_entity_t topic =
-            RequireOk(dds_create_topic(participant_guard.handle, &MujocoDDS_ControlMsg_desc,
-                                       "RobotControl", nullptr, nullptr),
-                      "dds_create_topic");
-        const dds_entity_t reader =
-            RequireOk(dds_create_reader(participant_guard.handle, topic, nullptr, nullptr),
-                      "dds_create_reader");
+        participant_guard.handle = RequireOk(dds_create_participant(DDS_DOMAIN_DEFAULT, nullptr, nullptr), "dds_create_participant");
+        const dds_entity_t topic = RequireOk(dds_create_topic(participant_guard.handle, &MujocoDDS_ControlMsg_desc, "RobotControl", nullptr, nullptr), "dds_create_topic");
+        const dds_entity_t reader = RequireOk(dds_create_reader(participant_guard.handle, topic, nullptr, nullptr), "dds_create_reader");
 
+        // 共享数据与 Planner
+        SharedControlData shared_data;
+        shared_data.raw_values.assign(num_actuators, 0.0);
+        
+        // 注意：SpotPlanner 现在完全属于物理线程，不需要锁
         SpotPlanner planner;
         planner.reset();
-        RobotState robot_state;
-        SharedControlBuffer shared_control;
-        shared_control.values.assign(num_actuators, 0.0);
         
         bool warned_clamp = false;
-        MujocoDDS_ControlMsg latest_command{};
-        bool planner_drive = true;   // start with planner standing
-        bool received_remote = false;
+
+        // --- 物理线程逻辑 (Fixed Time Step Loop) ---
         auto physics_loop = [&]() {
-            std::vector<double> local = shared_control.values;
+            using namespace std::chrono;
+            
+            // 本地缓存，减少锁竞争和内存分配
+            RobotState current_state;
+            std::vector<double> control_target(num_actuators, 0.0);
+            
+            bool local_use_planner = true;
+            control::BasicMotion local_motion = control::BasicMotion::kStand;
+            std::vector<double> local_raw_values(num_actuators, 0.0);
+
+            // 计时器
+            auto next_tick = steady_clock::now();
+            const auto tick_interval = microseconds(static_cast<int>(kSimulationDt * 1e6));
+
             while (sim_running.load(std::memory_order_acquire)) {
+                // 1. 同步外部指令 (最小化临界区)
                 {
-                    std::lock_guard<std::mutex> lock(shared_control.mutex);
-                    local = shared_control.values;
+                    std::lock_guard<std::mutex> lock(shared_data.mutex);
+                    local_use_planner = shared_data.use_planner;
+                    local_motion = shared_data.current_motion;
+                    if (!local_use_planner) {
+                        local_raw_values = shared_data.raw_values;
+                    }
                 }
-                robot.applyControlVector(local);
+
+                // 2. 获取机器人状态
+                robot.getState(current_state);
+
+                // 3. 计算控制输出
+                if (local_use_planner) {
+                    // 更新 Planner 模式
+                    if (planner.mode() != local_motion) {
+                        planner.setMode(local_motion);
+                    }
+                    
+                    // 运行步态规划算法
+                    planner.update(current_state);
+                    planner.getJointTargets(control_target);
+                    
+                    // 将目标值发送给 RobotSim 用于绘图 (线程安全)
+                    robot.updatePlotData(control_target);
+                } else {
+                    // Raw 模式直接透传
+                    control_target = local_raw_values;
+                }
+
+                // 4. 应用控制并执行物理步进
+                robot.applyControlVector(control_target);
                 robot.stepPhysics();
+
+                // 5. 休眠直到下一个时间片 (保持 500Hz)
+                next_tick += tick_interval;
+                std::this_thread::sleep_until(next_tick);
             }
         };
 
+        // 启动物理线程
         sim_running.store(true, std::memory_order_release);
         physics_thread = std::thread(physics_loop);
-        physics_started = true;
+
+        // --- 主线程逻辑 (Rendering & DDS Input) ---
+        MujocoDDS_ControlMsg latest_command{};
 
         while (true) {
-            const bool has_command = PollDDSCommands(reader, latest_command);
-            if (has_command) {
-                std::lock_guard<std::mutex> lock(shared_control.mutex);
-                if (latest_command.mode ==
-                    static_cast<uint32_t>(control::CommandMode::kBasic)) {
-                    control::BasicMotion motion;
-                    if (control::TryParseBasicMotion(latest_command.action, motion)) {
-                        if (motion == control::BasicMotion::kForward ||
-                            motion == control::BasicMotion::kStand) {
-                            planner.setMode(motion);
-                            planner_drive = true;
-                        } else {
-                            robot.applyBasicMotion(motion, shared_control.values);
-                            planner_drive = false;
-                        }
-                        received_remote = true;
-                    } else {
-                        std::cerr << "Unknown basic motion id: "
-                                  << latest_command.action << '\n';
-                    }
-                } else {
-                    CopyMessageToControl(latest_command, shared_control.values, warned_clamp);
-                    planner_drive = false;
-                    received_remote = true;
-                }
-            } 
-
-            if (planner_drive) {
-                robot.getState(robot_state);
-                planner.update(robot_state);
-                std::vector<double> qref;
-                planner.getJointTargets(qref);
-                std::lock_guard<std::mutex> lock(shared_control.mutex);
-                shared_control.values.assign(qref.begin(), qref.end());
-
-
-                if (qref.size() >= 12) {
-                    int p_idx = robot.plot_idx % robot.kPlotPoints;
-                    // 1. 记录四条腿的膝关节目标值 (Target)
-                    robot.plot_data[0][p_idx] = (float)qref[2];  // FR
-                    robot.plot_data[1][p_idx] = (float)qref[5];  // FL
-                    robot.plot_data[2][p_idx] = (float)qref[8];  // RR
-                    robot.plot_data[3][p_idx] = (float)qref[11]; // RL
-                    robot.plot_idx++;
-
-                    // 2. 将数据填入 mjvFigure 的线性缓冲区
-                    for (int k = 0; k < robot.kPlotPoints; k++) {
-                        int history_idx = (robot.plot_idx + k) % robot.kPlotPoints; 
-                        
-                        // 遍历 4 条线
-                        for (int line = 0; line < 4; ++line) {
-                            // 偶数位存 x (时间/索引)，奇数位存 y (数值)
-                            robot.fig.linedata[line][2*k]   = (float)k;
-                            robot.fig.linedata[line][2*k+1] = robot.plot_data[line][history_idx];
-                        }
-                    }
-                }
+            // 1. 处理 DDS 消息 (非阻塞)
+            if (PollDDSCommands(reader, latest_command)) {
+                CopyMessageToShared(latest_command, shared_data, warned_clamp);
             }
 
+            // 2. 渲染帧
+            // renderFrame 内部已经优化了锁的使用，不会长时间阻塞物理线程
             robot.renderFrame();
 
             if (robot.windowShouldClose()) {
@@ -239,15 +253,16 @@ int main(int argc, char** argv) {
 
         // 清理退出
         sim_running.store(false, std::memory_order_release);
-        if (physics_started && physics_thread.joinable()) {
+        if (physics_thread.joinable()) {
             physics_thread.join();
         }
 
         return EXIT_SUCCESS;
+
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
         sim_running.store(false, std::memory_order_release);
-        if (physics_started && physics_thread.joinable()) {
+        if (physics_thread.joinable()) {
             physics_thread.join();
         }
         return EXIT_FAILURE;

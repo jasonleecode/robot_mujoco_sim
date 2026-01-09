@@ -17,7 +17,7 @@ SpotPlanner::SpotPlanner()
     
     // 3. 在非ROS模式下，设置standing为true，以便步态算法可以执行
     // standing标志表示机器人已经处于站立状态，可以开始执行步态动作
-    trot_gait_->standing = true;
+    trot_gait_->standing = false;
 }
 
 SpotPlanner::~SpotPlanner() {
