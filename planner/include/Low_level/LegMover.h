@@ -11,11 +11,9 @@
 #include <iostream>
 #include <mutex>
 
-#include "rclcpp/rclcpp.hpp"
-
 #include "Quadruped/Robot.h"
 
-#include <eigen3/unsupported/Eigen/Splines>
+#include <unsupported/Eigen/Splines>
 
 #define PUB_RATE 1000
 #define ANGLE_RES 50

@@ -10,14 +10,20 @@
 BaseGait::BaseGait(Robot *robotModel, std::string nodeName):
 BodyMover(robotModel, nodeName), robotModel(robotModel)
 {
-    // gaitTimer_ = this->create_wall_timer(std::chrono::milliseconds(1), std::bind(&BaseGait::gaitCallback, this));
+#ifdef ENABLE_ROS
+    gaitTimer_ = this->create_wall_timer(std::chrono::milliseconds(1), std::bind(&BaseGait::gaitCallback, this));
     gait_params_sub = this->create_subscription<go2_gait_planner::msg::GaitParam>(
         gait_params_topic, 10, std::bind(&BaseGait::gaitParamsCallback, this, std::placeholders::_1));
     cmdPubTimer = this->create_wall_timer(std::chrono::milliseconds(1),
                                           std::bind(&BaseGait::publishLowCmd, this));
+
+#else
+    gaitTimer_.start(1, std::bind(&BaseGait::gaitCallback, this));
+#endif
 }
 
 
+#ifdef ENABLE_ROS
 void BaseGait::gaitParamsCallback(go2_gait_planner::msg::GaitParam::SharedPtr gaitParamsMsg)
 {
     setGaitMotion(static_cast<GaitMotion>(gaitParamsMsg->movement));
@@ -32,6 +38,7 @@ void BaseGait::gaitParamsCallback(go2_gait_planner::msg::GaitParam::SharedPtr ga
     }
     
 }
+#endif
 
 void BaseGait::setStanceDuration(int val)
 {
@@ -64,11 +71,17 @@ void BaseGait::setGaitMotion(GaitMotion val)
 
 void BaseGait::publishLowCmd()
 {
+#ifdef ENABLE_ROS
+    // ROS2 mode
     if(curTime % 10 > 5)
     {
         gaitCallback();
     }
     BodyMover::publishLowCmd();
+#else
+    // Standalone mode logic (if any) goes here
+
+#endif
 }
 
 BaseGait::~BaseGait()

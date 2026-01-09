@@ -7,10 +7,14 @@
 
 #include "Low_level/StateMonitor.h"
 
-StateMonitor::StateMonitor(Robot *robotModel, std::string nodeName) :
-Node(nodeName), robotModel(robotModel)
+StateMonitor::StateMonitor(Robot *robotModel, std::string nodeName) 
+#ifdef ENABLE_ROS
+    : Node(nodeName), robotModel(robotModel)
+#else
+    : robotModel(robotModel)
+#endif
 {
-    
+#ifdef ENABLE_ROS
     init_cmd();
     
     lowState_sub = this->create_subscription<unitree_go::msg::LowState>(
@@ -23,6 +27,7 @@ Node(nodeName), robotModel(robotModel)
 
     lowCmd_pub = this->create_publisher<unitree_go::msg::LowCmd>(joint_cmd_topic, 10);
     cmdPubTimer = this->create_wall_timer(std::chrono::milliseconds(1), std::bind(&StateMonitor::publishLowCmd, this));
+#endif
 
     qTarg = robotModel->getAngles();
     // Initialize Integral gains
@@ -35,6 +40,7 @@ Node(nodeName), robotModel(robotModel)
     imuFile.close(); */
 }
 
+#ifdef ENABLE_ROS
 void StateMonitor::init_cmd()
 {
     
@@ -52,6 +58,7 @@ void StateMonitor::init_cmd()
         lowCmdMsg.motor_cmd[i].tau = 0;
     }
 }
+#endif
 
 void StateMonitor::publishLowCmd()
 {
@@ -59,6 +66,7 @@ void StateMonitor::publishLowCmd()
     ++curTime;
     phaseIncr();
     
+#ifdef ENABLE_ROS
     /* std::ofstream imuFile;
     imuFile.open("positions" + std::to_string(startTime) + imuFileNameExt, std::ios_base::app);
     // std::cout << phase << std::endl; */
@@ -94,6 +102,7 @@ void StateMonitor::publishLowCmd()
 
     if (!paramsNotSet)
         lowCmd_pub->publish(lowCmdMsg);
+#endif
 }
 
 void StateMonitor::phaseIncr()
@@ -103,7 +112,8 @@ void StateMonitor::phaseIncr()
     else
         ++phase;
 }
- 
+
+#ifdef ENABLE_ROS
 void StateMonitor::stateUpdateCallback(const unitree_go::msg::LowState::SharedPtr msg)
 {
     //std::cout << "Updating robot state" << std::endl;
@@ -155,6 +165,7 @@ void StateMonitor::stateUpdateCallback(const unitree_go::msg::LowState::SharedPt
         writeToFile();
     
 }
+#endif
 
 void StateMonitor::writeToFile()
 {
@@ -213,6 +224,7 @@ void StateMonitor::writeToFile()
     imuFile.close();
 }
 
+#ifdef ENABLE_ROS
 void StateMonitor::paramsCallback(go2_gait_planner::msg::ParamsSet::SharedPtr paramsMsg)
 {
     std::vector<double> jointAngles = robotModel->getAngles();
@@ -294,7 +306,7 @@ void StateMonitor::jointsCallback(go2_gait_planner::msg::JointsSet::SharedPtr jo
     }
     std::cout << "gets here" << std::endl;
 }
-
+#endif
 
 std::vector<float> StateMonitor::quatToEuler(std::vector<float> quat)
 {

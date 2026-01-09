@@ -14,6 +14,7 @@
 #include <vector>
 #include <exception>
 
+#ifdef ENABLE_ROS
 #include "rclcpp/rclcpp.hpp"
 #include "unitree_go/msg/low_state.hpp"
 #include "unitree_go/msg/low_cmd.hpp"
@@ -22,26 +23,40 @@
 #include "go2_gait_planner/msg/gait_param.hpp"
 #include "go2_gait_planner/msg/joints_set.hpp"
 #include <std_msgs/msg/string.hpp>
+#endif
+
 #include "motor_crc.h"
 
 #define MAX_PHASE_VALUE 50
 
 #include "Quadruped/Robot.h"
 
+#ifdef ENABLE_ROS
 class StateMonitor : public rclcpp::Node
+#else
+class StateMonitor
+#endif
 {
 public:
     /**
      * @brief Constructs a StateMonitor instance.
      *
      * @param robotModel Pointer to the Robot object used for managing robot state.
-     * @param nodeName Name of the ROS 2 node.
+     * @param nodeName Name of the ROS 2 node (unused in non-ROS mode).
      */
     StateMonitor(Robot *robotModel, std::string nodeName);
+    
+    /**
+     * @brief Destructor for StateMonitor.
+     */
+    virtual ~StateMonitor() = default;
+    
     std::vector<double> qTarg; /**< Target joint angles for the robot. */
 
 protected:
+#ifdef ENABLE_ROS
     unitree_go::msg::LowCmd lowCmdMsg; /**< Message to publish low-level commands. */
+#endif
 
     /**
      * @brief Publishes the low-level command message.
@@ -65,8 +80,10 @@ protected:
      */
     uint32_t crc32_core(uint32_t *ptr, uint32_t len);
 
+#ifdef ENABLE_ROS
     // Timers
     rclcpp::TimerBase::SharedPtr cmdPubTimer; /**< Timer for publishing commands. */
+#endif
 
     std::string params_topic = "/go2_gait_planner/params"; /**< ROS 2 topic for parameters. */
 
@@ -77,12 +94,14 @@ private:
     const std::string imuFileName = "src/go2_gait_planner/imu_values_"; /**< Base name for IMU file output. */
     const std::string imuFileNameExt = ".txt";                     /**< Extension for IMU file output. */
 
+#ifdef ENABLE_ROS
     /**
      * @brief Callback function for state update messages.
      *
      * @param msg Shared pointer to the received LowState message.
      */
     void stateUpdateCallback(const unitree_go::msg::LowState::SharedPtr msg);
+#endif
 
     /**
      * @brief Initializes command messages.
@@ -101,12 +120,13 @@ private:
      * @return Vector of Euler angles.
      */
     std::vector<float> quatToEuler(std::vector<float> quaternions);
+
+#ifdef ENABLE_ROS
     /*
      * @brief Callback function for joint set messages.
      *
      * @param jointsMsg Shared pointer to the received JointsSet message.
      */
-
     void jointsCallback(go2_gait_planner::msg::JointsSet::SharedPtr jointsMsg);
     /**
      * @brief Callback function for parameters set messages.
@@ -114,6 +134,7 @@ private:
      * @param paramsMsg Shared pointer to the received ParamsSet message.
      */
     void paramsCallback(go2_gait_planner::msg::ParamsSet::SharedPtr paramsMsg);
+#endif
 
     int legType = 0;                  /**< Type of leg currently being processed. */
     const long long simTime = 200000; /**< Simulation time in milliseconds (20s). */
@@ -125,6 +146,7 @@ private:
 
     uint32_t phase = 0; /**< Current phase of the robot's operation. */
 
+#ifdef ENABLE_ROS
     // Publishers and Subscribers
     rclcpp::Subscription<unitree_go::msg::LowState>::SharedPtr lowState_sub;
     rclcpp::Publisher<unitree_go::msg::LowCmd>::SharedPtr lowCmd_pub;
@@ -134,6 +156,7 @@ private:
     std::string joint_state_topic = "/lowstate";      /**< ROS 2 topic for joint state updates. */
     std::string joint_cmd_topic = "/lowcmd";          /**< ROS 2 topic for joint commands. */
     std::string joints_topic = "/go2_gait_planner/joints"; /**< ROS 2 topic for joints set messages. */
+#endif
 };
 
 #endif // STATEMONITOR

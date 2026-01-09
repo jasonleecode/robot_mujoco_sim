@@ -1,14 +1,17 @@
 #pragma once
 
 #include <vector>
+#include <string>
+#include <memory> // [新增]
 #include <Eigen/Dense>
 
 #include "ControlActions.hpp"
 
-// 前向声明planner模块的Robot类
-class Robot;
-class Leg;
+// [新增] 引入 planner 库的头文件
+#include "Quadruped/Robot.h"
+#include "Low_level/TrotGait.h"
 
+// 定义 RobotState (保持不变)
 struct RobotState {
     std::vector<double> qpos;
     std::vector<double> qvel;
@@ -17,10 +20,8 @@ struct RobotState {
 
 /**
  * @class SpotPlanner
- * @brief 封装planner模块的接口类，使用Robot类和运动学模型进行步态规划
- * 
- * 这个类是对planner模块的封装，内部使用planner模块的Robot类和运动学模型
- * 来生成机器人的步态控制指令。
+ * @brief 适配器类：将 MuJoCo 的 RobotState 转换为 TrotGait 需要的数据，
+ * 并驱动 TrotGait 算法运行。
  */
 class SpotPlanner {
 public:
@@ -28,37 +29,32 @@ public:
     ~SpotPlanner();
 
     void reset();
+    
+    // 设置运动模式 (Forward, Turn, Stand...)
     void setMode(control::BasicMotion motion);
     control::BasicMotion mode() const { return mode_; }
+
+    // 核心更新函数：传入 MuJoCo 状态，运行一步规划
     void update(const RobotState& state);
+
+    // 获取规划出的关节角度 (12维向量)
     void getJointTargets(std::vector<double>& qref);
     
-    // 设置实际机器人状态（用于步态调整）
+    // (可选) 兼容旧接口，虽然现在 update 里已经包含了状态设置
     void setCurrentState(const RobotState& state);
 
 private:
-    // planner模块的Robot类实例
-    Robot* robot_model_;
-    
-    // 步态参数
-    double phase_;
-    double last_time_;
+    // [关键] 内部持有一个 planner 库定义的 Robot 实例
+    // 注意：这个 Robot 是纯算法模型，不是 MuJoCo 的 mjModel
+    Robot planner_robot_; 
+
+    // [关键] 持有步态算法实例
+    std::unique_ptr<TrotGait> trot_gait_;
+
     control::BasicMotion mode_;
-    double current_yaw_rate_ = 0.0; // 用于平滑转向过渡
-    double speed_multiplier_ = 0.0;
+    double last_time_;
     
-    // 标准站立位置的关节角度（用于初始化）
-    std::vector<double> stand_angles_;
-    
-    // 标准站立位置的足端位置（在机器人坐标系中）
-    std::vector<Eigen::Vector3d> stand_foot_positions_;
-    
-    // 当前实际机器人状态（用于步态调整）
-    RobotState current_state_;
-    bool has_current_state_ = false;
-    
-    // 辅助函数：将SpotPlanner的腿索引映射到Robot的legs数组索引
-    // SpotPlanner: 0=FL, 1=FR, 2=RL, 3=RR
-    // Robot legs:  0=FR, 1=FL, 2=RR, 3=RL
-    int mapLegIndex(int spot_leg_index) const;
+    // 辅助：状态映射
+    void mapMujocoToPlanner(const RobotState& state);
+    void mapPlannerToRef(std::vector<double>& qref);
 };

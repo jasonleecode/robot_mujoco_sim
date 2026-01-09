@@ -1,249 +1,167 @@
 #include "planner.h"
-#include "Quadruped/Robot.h"
-#include "Quadruped/Leg.h"
-#include "spot_robot_params.h"
 #include "LegIndexHelper.hpp"
+#include <iostream>
 
-#include <cmath>
-#include <algorithm>
-#include <Eigen/Dense>
-
-static constexpr int kNumJoints = 12;
-
-// 在planner.cpp顶部添加
-
-// 默认站立姿态的关节角度（FL, FR, RL, RR顺序，每个腿3个关节）
-// 从spot.xml的keyframe "home"提取：qpos="0 1.04 -1.8" (每个腿)
-static const double kStandPose[kNumJoints] = {
-    spot_params::STAND_HX, spot_params::STAND_HY, spot_params::STAND_KN,   // FL (HX, HY, KN)
-    spot_params::STAND_HX, spot_params::STAND_HY, spot_params::STAND_KN,   // FR
-    spot_params::STAND_HX, spot_params::STAND_HY, spot_params::STAND_KN,   // RL
-    spot_params::STAND_HX, spot_params::STAND_HY, spot_params::STAND_KN    // RR
-};
-
-// 注意：planner模块的Robot类使用硬编码的宏定义参数（LEN_BASE, LEN_HIP等），
-// 这些参数是为Go2机器人设计的。Spot机器人的实际参数记录在spot_robot_params.h中。
-// 由于无法直接修改planner模块的参数，当前实现使用实际机器人状态进行步态调整。
-
-// 腿索引映射：SpotPlanner索引 -> Robot legs数组索引
-// SpotPlanner内部顺序: 0=FL, 1=FR, 2=RL, 3=RR
-// Robot legs数组顺序:  0=FR, 1=FL, 2=RR, 3=RL
-static const int kLegIndexMap[4] = {1, 0, 3, 2}; // FL->1, FR->0, RL->3, RR->2
-
-// MuJoCo关节顺序: FL, FR, HL(RL), HR(RR) - 但qpos前7个是body位置和四元数，关节从索引7开始
-// SpotPlanner内部顺序: FL, FR, RL, RR
-// Robot类期望顺序: FR, FL, RR, RL
-
-// 将SpotPlanner内部顺序(FL,FR,RL,RR)转换为Robot类期望顺序(FR,FL,RR,RL)
-static std::vector<double> convertToRobotOrder(const std::vector<double>& spot_angles) {
-    std::vector<double> robot_angles(12);
-    // SpotPlanner: FL(0), FR(1), RL(2), RR(3) -> Robot: FR(1), FL(0), RR(3), RL(2)
-    for (int leg = 0; leg < 4; ++leg) {
-        int robot_leg = kLegIndexMap[leg];
-        for (int joint = 0; joint < 3; ++joint) {
-            robot_angles[robot_leg * 3 + joint] = spot_angles[leg * 3 + joint];
-        }
-    }
-    return robot_angles;
-}
-
-// MuJoCo qpos中关节角度的起始索引（前7个是body位置和四元数）
-static constexpr int kMuJoCoJointStartIdx = 7;
-
+// 构造函数：初始化 planner 库的对象
 SpotPlanner::SpotPlanner() 
-    : robot_model_(new Robot())
-    , phase_(0.0)
+    : last_time_(0.0)
     , mode_(control::BasicMotion::kStand)
-    , last_time_(-1.0)
 {
-    // 初始化标准站立角度（SpotPlanner内部顺序：FL, FR, RL, RR）
-    stand_angles_.assign(kStandPose, kStandPose + kNumJoints);
+    // 1. 初始化算法模型
+    // 注意：TrotGait 的构造函数需要 Robot 指针和 nodeName
+    // 在非 ROS 模式下，nodeName 可以为空
+    trot_gait_ = std::make_unique<TrotGait>(&planner_robot_, "");
+
+    // 2. 初始化一些默认参数 (例如步态频率、高度等)
+    trot_gait_->setStanceDuration(250);
     
-    // 转换为Robot类期望的顺序并设置
-    std::vector<double> robot_angles = convertToRobotOrder(stand_angles_);
-    robot_model_->setAngles(robot_angles);
-    
-    // 获取标准站立位置的足端位置（相对于机器人基座）
-    // getPosition_*方法返回的是实际的FL/FR/RL/RR位置，不依赖于legs数组索引
-    stand_foot_positions_.resize(4);
-    stand_foot_positions_[0] = robot_model_->getPosition_FL(); // FL
-    stand_foot_positions_[1] = robot_model_->getPosition_FR(); // FR
-    stand_foot_positions_[2] = robot_model_->getPosition_RL(); // RL
-    stand_foot_positions_[3] = robot_model_->getPosition_RR(); // RR
+    // 3. 在非ROS模式下，设置standing为true，以便步态算法可以执行
+    // standing标志表示机器人已经处于站立状态，可以开始执行步态动作
+    trot_gait_->standing = true;
 }
 
 SpotPlanner::~SpotPlanner() {
-    if (robot_model_) {
-        delete robot_model_;
-        robot_model_ = nullptr;
-    }
-}
-
-int SpotPlanner::mapLegIndex(int spot_leg_index) const {
-    if (spot_leg_index >= 0 && spot_leg_index < 4) {
-        return kLegIndexMap[spot_leg_index];
-    }
-    return spot_leg_index;
+    // unique_ptr 会自动释放
 }
 
 void SpotPlanner::reset() {
-    phase_ = 0.0;
     mode_ = control::BasicMotion::kStand;
-    last_time_ = -1.0;
-    speed_multiplier_ = 0.0;
-    current_yaw_rate_ = 0.0;
-    has_current_state_ = false;
+    trot_gait_->setGaitMotion(GaitMotion::STOP);
+    trot_gait_->standing = true;  // 确保standing标志为true
+    // 重置 robot 状态...
+}
+
+void SpotPlanner::setMode(control::BasicMotion motion) {
+    mode_ = motion;
     
-    // 重置Robot到标准站立位置（需要转换为Robot类期望的顺序）
-    std::vector<double> robot_angles = convertToRobotOrder(stand_angles_);
-    robot_model_->setAngles(robot_angles);
-}
-
-void SpotPlanner::setCurrentState(const RobotState& state) {
-    current_state_ = state;
-    has_current_state_ = true;
-}
-
-void SpotPlanner::setMode(control::BasicMotion mode) {
-    mode_ = mode;
-}
-
-void SpotPlanner::update(const RobotState& state) {
-    // 保存当前状态用于步态调整
-    current_state_ = state;
-    has_current_state_ = true;
-    
-    if (last_time_ < 0) {
-        last_time_ = state.time;
-        return;
+    // 将外部的 ControlAction 映射到 TrotGait 的枚举
+    switch (motion) {
+        case control::BasicMotion::kStand:
+            trot_gait_->setGaitMotion(GaitMotion::STOP);
+            break;
+        case control::BasicMotion::kForward:
+            trot_gait_->setGaitMotion(GaitMotion::FORWARD);
+            break;
+        case control::BasicMotion::kBackward:
+            trot_gait_->setGaitMotion(GaitMotion::BACKWARD);
+            break;
+        case control::BasicMotion::kTurnLeft:
+            trot_gait_->setGaitMotion(GaitMotion::LEFT);
+            break;
+        case control::BasicMotion::kTurnRight:
+            trot_gait_->setGaitMotion(GaitMotion::RIGHT);
+            break;
+        case control::BasicMotion::kJump:
+            trot_gait_->setGaitMotion(GaitMotion::JUMP);
+            break;
+        default:
+            trot_gait_->setGaitMotion(GaitMotion::STOP);
+            break;
     }
-    double dt = state.time - last_time_;
+}
+
+// 核心：状态同步 -> 步态计算
+void SpotPlanner::update(const RobotState& state) {
+    // 1. 控制调用频率
+    // TrotGait 内部并没有频率控制，它依赖外部调用的间隔。
+    // 如果仿真步长是 2ms (500Hz)，而步态逻辑希望 1000Hz 或 500Hz 运行，直接调用即可。
+    // 如果需要降频 (比如步态只跑 100Hz)，这里加一个计时器判断。
+    
+    if (state.time - last_time_ < 0.002) { 
+        // 防止过于频繁调用（如果仿真步长极小）
+        return; 
+    }
     last_time_ = state.time;
 
-    // 简单的转向平滑滤波
-    double target_yaw = 0.0;
-    if (mode_ == control::BasicMotion::kTurnLeft) target_yaw = 0.4;
-    else if (mode_ == control::BasicMotion::kTurnRight) target_yaw = -0.4;
+    // 2. 将 MuJoCo 的真实状态 (反馈) 填入 planner_robot_
+    mapMujocoToPlanner(state);
 
-    // 线性插值，让转向动作不那么突兀
-    current_yaw_rate_ += (target_yaw - current_yaw_rate_) * 0.1;
-
-    // 速度斜坡 (Speed Ramp) - 平滑加速/减速
-    double target_multiplier = (mode_ == control::BasicMotion::kForward) ? 1.0 : 0.0;
-    
-    // 每一帧平滑靠近目标速度，0.05 是平滑系数（可根据需要调整）
-    speed_multiplier_ += (target_multiplier - speed_multiplier_) * 0.05;
-
-    // 更新步态相位：根据速度倍率动态调整频率
-    double freq = 1.5 * speed_multiplier_; // 步态频率 (Hz)
-    
-    if (mode_ == control::BasicMotion::kForward || phase_ > 0.01) {
-        // 只有在前进模式或相位未回到 0 时继续推进（确保停步时动作完整）
-        phase_ += freq * dt;
-        if (phase_ > 1.0) phase_ -= 1.0;
+    // 3. 在非ROS模式下，需要手动调用legMovers的mover()来更新straightPhase和swingPhase
+    // 在ROS模式下，这些由定时器调用，但在非ROS模式下需要手动调用
+    for (int i = 0; i < 4; ++i) {
+        trot_gait_->legMovers[i]->mover();
     }
-    
-    // 停止逻辑：如果模式是 Stand 且速度倍率接近0，强制归零实现平滑停止
-    if (mode_ == control::BasicMotion::kStand && speed_multiplier_ < 0.01) {
-        phase_ *= 0.95; // 衰减
-        if (phase_ < 0.001) phase_ = 0.0;
-    }
+
+    // 4. 运行一步步态规划
+    // 这会更新 planner_robot_.legs[i]->q_target
+    trot_gait_->runStep(); 
 }
 
 void SpotPlanner::getJointTargets(std::vector<double>& qref) {
-    qref.resize(kNumJoints);
+    // 将 planner_robot_ 计算出的目标角度填回 qref
+    mapPlannerToRef(qref);
+}
 
-    // Stand mode with zero phase
-    if (mode_ == control::BasicMotion::kStand && phase_ < 0.001) {
-        // Return MuJoCo order directly (FL, FR, RL, RR)
-        qref = stand_angles_;
-        return;
-    }
+void SpotPlanner::setCurrentState(const RobotState& state) {
+    // 兼容接口，直接调用 map
+    mapMujocoToPlanner(state);
+}
 
-    // --- Step A: Update Robot Model with current state ---
-    if (has_current_state_ && current_state_.qpos.size() >= kMuJoCoJointStartIdx + kNumJoints) {
-        std::vector<double> mujoco_angles(kNumJoints);
-        for(int i = 0; i < kNumJoints; ++i) {
-            mujoco_angles[i] = current_state_.qpos[kMuJoCoJointStartIdx + i];
-        }
-        // Convert to Robot order before setting
-        std::vector<double> robot_angles = LegIndexHelper::mujocoToRobotOrder(mujoco_angles);
-        robot_model_->setAngles(robot_angles);
-    }
+// --- 辅助映射函数 ---
 
-    bool is_forward = (mode_ == control::BasicMotion::kForward);
+// MuJoCo (qpos) -> Planner Robot (q, qd)
+void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
+    // MuJoCo qpos 结构: [0-6] 基座位置姿态, [7-18] 关节角度
+    // MuJoCo qvel 结构: [0-5] 基座速度角速度, [6-17] 关节角速度
     
-    double turn_factor = 0.0;
-    if (mode_ == control::BasicMotion::kTurnLeft) turn_factor = 0.4;
-    if (mode_ == control::BasicMotion::kTurnRight) turn_factor = -0.4;
+    // 1. 映射基座状态 (如果有 IMU 数据，填入 planner_robot_.body)
+    // planner_robot_.body.pos = ...
+    // planner_robot_.body.rpy = ... (通常 TrotGait 只需要 rpy)
 
-    const double offsets[4] = {0.0, 0.5, 0.5, 0.0};  // Trot gait
-    double base_stride_x = is_forward ? 0.08 : 0.0;
-    double stride_x = base_stride_x * speed_multiplier_;
-    double lift_h = 0.05 * speed_multiplier_;
+    // 2. 映射关节状态
+    // 假设 MuJoCo 顺序: FL, FR, RL, RR (根据你的 spot_robot_params.h)
+    // 假设 Planner 顺序: FR, FL, RR, RL (TrotGait 的常见顺序)
+    
+    // 我们遍历 MuJoCo 的腿 (i=0:FL, 1:FR...)
+    for (int i = 0; i < 4; ++i) {
+        // 使用你的 Helper 找到对应的 Planner 腿索引
+        // 假设 LegIndexHelper::toPlannerIndex(i) 返回对应的 FR/FL...
+        // 这里为了演示，假设简单的一一对应，你需要根据实际情况修改！
+        
+        // 假设:
+        // MuJoCo: 0:FL, 1:FR, 2:RL, 3:RR
+        // Planner: 0:FR, 1:FL, 2:RR, 3:RL
+        int planner_leg_idx = -1;
+        if(i==0) planner_leg_idx = 1; // FL -> FL(1)
+        if(i==1) planner_leg_idx = 0; // FR -> FR(0)
+        if(i==2) planner_leg_idx = 3; // RL -> RL(3)
+        if(i==3) planner_leg_idx = 2; // RR -> RR(2)
 
-    // Process each leg in SpotPlanner order (FL, FR, RL, RR)
-    for (int leg = 0; leg < 4; ++leg) {
-        // Calculate gait phase
-        double leg_phase = std::fmod(phase_ + offsets[leg], 1.0);
-        
-        // Get base foot position
-        Eigen::Vector3d base_foot_pos = stand_foot_positions_[leg];
-        Eigen::Vector3d foot_offset(0, 0, 0);
-        
-        // Forward/backward swing
-        double swing_x = -std::cos(2 * M_PI * leg_phase);
-        foot_offset.x() = stride_x * swing_x;
-        
-        // Vertical lift during swing phase
-        double lift = (leg_phase < 0.5) ? std::sin(M_PI * leg_phase / 0.5) : 0;
-        foot_offset.z() = lift_h * lift;
-        
-        // Lateral offset for turning
-        double side_sign = (leg == 0 || leg == 2) ? 1.0 : -1.0;  // FL, RL: +, FR, RR: -
-        foot_offset.y() = turn_factor * side_sign * 0.02;
-        
-        Eigen::Vector3d target_foot_pos = base_foot_pos + foot_offset;
-        
-        // Get actual current foot position
-        int robot_leg_idx = LegIndexHelper::toRobotIndex(leg);
-        Eigen::Vector3d actual_current_foot_pos;
-        switch(robot_leg_idx) {
-            case 0: actual_current_foot_pos = robot_model_->getPosition_FR(); break;
-            case 1: actual_current_foot_pos = robot_model_->getPosition_FL(); break;
-            case 2: actual_current_foot_pos = robot_model_->getPosition_RR(); break;
-            case 3: actual_current_foot_pos = robot_model_->getPosition_RL(); break;
-            default: actual_current_foot_pos = base_foot_pos; break;
-        }
+        int mujoco_q_offset = 7 + i * 3;
+        int mujoco_v_offset = 6 + i * 3;
 
-        Eigen::Vector3d correction_delta = target_foot_pos - actual_current_foot_pos;
-        
-        // Get IK seed angles from MuJoCo state
-        Eigen::Vector3d current_angles;
-        if (has_current_state_) {
-            int mujoco_offset = LegIndexHelper::toMuJoCoOffset(leg);
-            int mujoco_base = kMuJoCoJointStartIdx + mujoco_offset;
-            current_angles[0] = current_state_.qpos[mujoco_base];
-            current_angles[1] = current_state_.qpos[mujoco_base + 1];
-            current_angles[2] = current_state_.qpos[mujoco_base + 2];
-        } else {
-            // Fallback to stand pose
-            current_angles[0] = stand_angles_[leg * 3];
-            current_angles[1] = stand_angles_[leg * 3 + 1];
-            current_angles[2] = stand_angles_[leg * 3 + 2];
-            correction_delta = target_foot_pos - base_foot_pos;
-        }
-        
-        // Solve IK
-        Leg* robot_leg = robot_model_->legs[robot_leg_idx];
-        Eigen::Vector3d new_angles = robot_leg->getKinematics()->jointAngleCompute(
-            current_angles, correction_delta
+        // 填入 Robot 模型
+        // 使用 setAngles 和 setJointVels 方法
+        planner_robot_.legs[planner_leg_idx]->setAngles(
+            state.qpos[mujoco_q_offset + 0],
+            state.qpos[mujoco_q_offset + 1],
+            state.qpos[mujoco_q_offset + 2]
         );
         
-        // Store in MuJoCo order
-        int mujoco_offset = LegIndexHelper::toMuJoCoOffset(leg);
-        qref[mujoco_offset] = new_angles[0];
-        qref[mujoco_offset + 1] = new_angles[1];
-        qref[mujoco_offset + 2] = new_angles[2];
+        planner_robot_.legs[planner_leg_idx]->setJointVels(Eigen::Vector3d(
+            state.qvel[mujoco_v_offset + 0],
+            state.qvel[mujoco_v_offset + 1],
+            state.qvel[mujoco_v_offset + 2]
+        ));
+    }
+}
+
+// Planner Robot (q_target) -> qref (发送给 MuJoCo)
+void SpotPlanner::mapPlannerToRef(std::vector<double>& qref) {
+    qref.resize(12);
+    
+    // TrotGait 继承自 BaseGait -> BodyMover -> StateMonitor
+    // StateMonitor 有 qTarg 成员，存储目标关节角度
+    // qTarg 的顺序是 Robot 类的腿顺序: FR(0), FL(1), RR(2), RL(3)
+    
+    // 遍历 MuJoCo 的腿顺序 (FL, FR, RL, RR)
+    for (int i = 0; i < 4; ++i) {
+        int planner_leg_idx = LegIndexHelper::toRobotIndex(i); // 转换为Robot顺序
+        
+        // 从 qTarg 中读取目标角度（qTarg 的顺序是 Robot 腿顺序）
+        int qTarg_offset = planner_leg_idx * 3;
+        qref[i * 3 + 0] = trot_gait_->qTarg[qTarg_offset + 0];
+        qref[i * 3 + 1] = trot_gait_->qTarg[qTarg_offset + 1];
+        qref[i * 3 + 2] = trot_gait_->qTarg[qTarg_offset + 2];
     }
 }

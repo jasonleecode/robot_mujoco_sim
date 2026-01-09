@@ -4,6 +4,7 @@ project(MujocoDDSExample)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_ARCHITECTURES arm64)
+set(ENABLE_ROS OFF CACHE BOOL "Disable ROS for standalone build" FORCE)
 
 option(BUILD_MUJOCO_SAMPLES "Build MuJoCo sample console apps in /sample" OFF)
 option(BUILD_MUJOCO_SIMULATE "Build the MuJoCo simulate UI in /simulate" OFF)
@@ -72,11 +73,10 @@ set(MUJOCO_PLATFORM_LIBS
 )
 
 # === 链接库 ===
-# [修改点 3] 必须将 ${OpenCV_LIBS} 加入链接列表
 target_link_libraries(MujocoDDSExample PRIVATE 
     ${MUJOCO_PLATFORM_LIBS} 
     CycloneDDS::ddsc
-    ${OpenCV_LIBS}   # <--- 这里是最关键的一步！
+    ${OpenCV_LIBS} 
     planner            # Planner模块
 )
 

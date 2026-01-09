@@ -10,16 +10,17 @@
 
 #include <iostream>
 
+#ifdef ENABLE_ROS
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "go2_gait_planner/msg/move_leg.hpp"
+#include "go2_gait_planner/msg/params_set.hpp"
+#endif
 
 #include "Quadruped/Robot.h"
 #include "Low_level/StateMonitor.h"
-#include "go2_gait_planner/msg/move_leg.hpp"
-#include "go2_gait_planner/msg/params_set.hpp"
 #include "Low_level/LegMover.h"
-
-#include <eigen3/unsupported/Eigen/Splines>
+#include <unsupported/Eigen/Splines>
 
 #define NOMINAL_HEIGHT 0.25
 
@@ -126,6 +127,11 @@ private:
     LegMover *RR_legMover; /**< LegMover instance for the rear-right leg. */
     LegMover *RL_legMover; /**< LegMover instance for the rear-left leg. */
 
+    Eigen::Vector<double, 12> sitPos;   /**< Vector representing the robot's sitting position. */
+    Eigen::Vector<double, 12> standPos; /**< Vector representing the robot's standing position. */
+    bool standCmd = false;              /**< Boolean flag indicating if the stand command has been issued. */
+
+#ifdef ENABLE_ROS
     /**
      * @brief Callback function for processing movement commands.
      * @param moveMsg Shared pointer to the MoveLeg message containing movement commands.
@@ -138,10 +144,6 @@ private:
      */
     void standSitCallback(std_msgs::msg::Int32::SharedPtr standSitMsg);
 
-    Eigen::Vector<double, 12> sitPos;   /**< Vector representing the robot's sitting position. */
-    Eigen::Vector<double, 12> standPos; /**< Vector representing the robot's standing position. */
-    bool standCmd = false;              /**< Boolean flag indicating if the stand command has been issued. */
-
     rclcpp::TimerBase::SharedPtr FR_moveTimer_; /**< ROS2 Timer for triggering front-right leg movements. */
     rclcpp::TimerBase::SharedPtr FL_moveTimer_; /**< ROS2 Timer for triggering front-left leg movements. */
     rclcpp::TimerBase::SharedPtr RR_moveTimer_; /**< ROS2 Timer for triggering rear-right leg movements. */
@@ -153,6 +155,7 @@ private:
 
     std::string mover_topic = "/go2_gait_planner/move";         /**< ROS2 topic for movement commands. */
     std::string standSit_topic = "/go2_gait_planner/stand_sit"; /**< ROS2 topic for stand/sit commands. */
+#endif
 };
 
 #endif // BODY_MOVER

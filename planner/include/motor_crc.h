@@ -7,10 +7,13 @@
 
 #include <stdint.h>
 #include <array>
+
+#ifdef ENABLE_ROS
 #include "rclcpp/rclcpp.hpp"
 #include "unitree_go/msg/low_cmd.hpp"
 #include "unitree_go/msg/motor_cmd.hpp"
 #include "unitree_go/msg/bms_cmd.hpp"
+#endif
 
 constexpr int HIGHLEVEL = 0xee;
 constexpr int LOWLEVEL = 0xff;
@@ -100,11 +103,13 @@ typedef struct
  */
 uint32_t crc32_core(uint32_t *ptr, uint32_t len);
 
+#ifdef ENABLE_ROS
 /**
  * @brief Computes and sets the CRC for a LowCmd message.
  *
  * @param msg Reference to a LowCmd message.
  */
 void get_crc(unitree_go::msg::LowCmd &msg);
+#endif
 
 #endif

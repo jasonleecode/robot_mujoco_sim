@@ -9,14 +9,19 @@
 #define BASE_GAIT
 
 #include <iostream>
+#include <vector>
+#include <thread>
 
+#ifdef ENABLE_ROS
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "go2_gait_planner/msg/gait_param.hpp"
+#endif
 
+#include "Timer.h"
 #include "Quadruped/Robot.h"
 #include "Low_level/BodyMover.h"
-
-#include <eigen3/unsupported/Eigen/Splines>
+#include <unsupported/Eigen/Splines>
 
 /**
  * @enum GaitMotion
@@ -51,11 +56,39 @@ public:
      * @param robotModel Pointer to the Robot model used for the gait.
      * @param nodeName Name of the ROS2 node associated with this gait.
      */
-    BaseGait(Robot *robotModel, std::string nodeName);
+    BaseGait(Robot *robotModel, std::string nodeName = "");
     /**
      * @brief Destructor for the BaseGait class.
      */
     ~BaseGait();
+
+    void runStep() {
+        this->gaitCallback();
+    }
+
+    /**
+     * @brief Set the current gait motion.
+     * @param val The GaitMotion value to set.
+     */
+    void setGaitMotion(GaitMotion val);
+
+    /**
+     * @brief Set the duration of the stance phase.
+     * @param val Duration in milliseconds.
+     */
+    void setStanceDuration(int val);
+
+    /**
+     * @brief Set the depth of the stance phase.
+     * @param val Depth in meters.
+     */
+    void setStanceDepth(float val);
+
+    /**
+     * @brief Set the height of the swing phase.
+     * @param val Height in meters.
+     */
+    void setSwingHeight(float val);
 
 protected:
     int stance_duration = 300;    /**< Duration of the stance phase in milliseconds. */
@@ -76,43 +109,24 @@ protected:
 private:
     Robot *robotModel; /**< Pointer to the Robot model associated with this gait. */
 
+#ifdef ENABLE_ROS    
     /**
      * @brief Callback function for gait parameter updates.
      * @param gaitParamsMsg Shared pointer to the GaitParam message containing updated parameters.
      */
     void gaitParamsCallback(go2_gait_planner::msg::GaitParam::SharedPtr gaitParamsMsg);
-
-    /**
-     * @brief Set the duration of the stance phase.
-     * @param val Duration in milliseconds.
-     */
-    void setStanceDuration(int val);
-
-    /**
-     * @brief Set the depth of the stance phase.
-     * @param val Depth in meters.
-     */
-    void setStanceDepth(float val);
-
-    /**
-     * @brief Set the height of the swing phase.
-     * @param val Height in meters.
-     */
-    void setSwingHeight(float val);
-
-    /**
-     * @brief Set the current gait motion.
-     * @param val The GaitMotion value to set.
-     */
-    void setGaitMotion(GaitMotion val);
+    rclcpp::TimerBase::SharedPtr gaitTimer_;
+    rclcpp::Subscription<go2_gait_planner::msg::GaitParam>::SharedPtr gait_params_sub;
+    /**< Topic name for gait parameter updates. */
+    std::string gait_params_topic = "/go2_gait_planner/gait_msg";
+#else
+    Timer gaitTimer_;
+#endif
+    
 
     void publishLowCmd() override;
 
-    rclcpp::TimerBase::SharedPtr gaitTimer_;
-    rclcpp::Subscription<go2_gait_planner::msg::GaitParam>::SharedPtr gait_params_sub;
-
-    /**< Topic name for gait parameter updates. */
-    std::string gait_params_topic = "/go2_gait_planner/gait_msg";
+private:
 };
 
 #endif // BASE_GAIT

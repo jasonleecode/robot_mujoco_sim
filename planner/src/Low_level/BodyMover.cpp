@@ -30,6 +30,7 @@ StateMonitor(robotModel, nodeName), robotModel(robotModel)
     standPos = STAND_POS;
     sitPos = SIT_POS;
 
+#ifdef ENABLE_ROS
     FR_moveTimer_ = this->create_wall_timer(std::chrono::milliseconds((int)(1000/PUB_RATE)),
                                             std::bind(&LegMover::mover, FR_legMover));
     FL_moveTimer_ = this->create_wall_timer(std::chrono::milliseconds((int)(1000/PUB_RATE)),
@@ -49,6 +50,7 @@ StateMonitor(robotModel, nodeName), robotModel(robotModel)
     create_subscription<std_msgs::msg::Int32>(standSit_topic, 10,
                                                    std::bind(&BodyMover::standSitCallback,
                                                              this, std::placeholders::_1));
+#endif
 }
 
 void BodyMover::publishLowCmd()
@@ -70,6 +72,7 @@ void BodyMover::publishLowCmd()
 
 }
 
+#ifdef ENABLE_ROS
 void BodyMover::moverCallback(go2_gait_planner::msg::MoveLeg::SharedPtr moveMsg)
 {
     startTime = curTime;
@@ -147,6 +150,7 @@ void BodyMover::standSitCallback(std_msgs::msg::Int32::SharedPtr standSitMsg)
 
     
 }
+#endif
 
 BodyMover::~BodyMover()
 {

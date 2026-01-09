@@ -10,10 +10,9 @@
 
 #include <iostream>
 
-#include "rclcpp/rclcpp.hpp"
 #include "Low_level/BaseGait.h"
 
-#include <eigen3/unsupported/Eigen/Splines>
+#include <unsupported/Eigen/Splines>
 
 #define REAR_OFFSET -0.00
 #define SWING_DISTANCE 0.1
