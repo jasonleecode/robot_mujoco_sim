@@ -26,11 +26,11 @@
 
 #define THIGH_UP_LIM 2.0  // 1.7453
 #define THIGH_LO_LIM -0.1 //-0.7854
-#define DEFAULT_ANGLE_THIGH 1.3
+#define DEFAULT_ANGLE_THIGH 1.04
 
 #define CALF_UP_LIM -0.05 //-0.15
 #define CALF_LO_LIM -2.9
-#define DEFAULT_ANGLE_CALF -2.8
+#define DEFAULT_ANGLE_CALF -1.8
 
 #define CALF_OFFSET 0.0873
 // #define CALF_OFFSET 0.0

@@ -31,7 +31,9 @@ void SpotPlanner::reset() {
 
 void SpotPlanner::setMode(control::BasicMotion motion) {
     mode_ = motion;
-    
+    if (trot_gait_) {
+        trot_gait_->active = true;
+    }
     // 将外部的 ControlAction 映射到 TrotGait 的枚举
     switch (motion) {
         case control::BasicMotion::kStand:

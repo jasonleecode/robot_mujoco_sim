@@ -137,6 +137,11 @@ int RequireOk(int value, const char* label) {
 
 }  // namespace
 
+template<typename T>
+T lerp(T a, T b, double t) {
+    return a + (b - a) * t;
+}
+
 int main(int argc, char** argv) {
     std::thread physics_thread;
     std::atomic<bool> sim_running{false};
@@ -184,6 +189,11 @@ int main(int argc, char** argv) {
             std::vector<double> local_raw_values(num_actuators, 0.0);
 
             bool is_control_active = false;
+            // [新增] 归位相关变量
+            bool is_homing_complete = false;       // 是否完成归位
+            double homing_duration = 2.0;          // 归位耗时 2秒
+            double current_sim_time = 0.0;         // 仿真累积时间
+            std::vector<double> spawn_qpos;        // 出生时的关节角度
 
             // 计时器
             auto next_tick = steady_clock::now();
@@ -203,8 +213,47 @@ int main(int argc, char** argv) {
                 // 2. 获取机器人状态
                 robot.getState(current_state);
 
+                // 记录第一帧的出生姿态
+                if (spawn_qpos.empty() && current_state.qpos.size() >= num_actuators) {
+                    spawn_qpos.resize(num_actuators);
+                    // 注意 MuJoCo qpos offset = 7
+                    for(int i=0; i<num_actuators; ++i) spawn_qpos[i] = current_state.qpos[7+i];
+                }
+
                 // 3. 计算控制输出
                 if (local_use_planner) {
+
+                    // === 阶段一：软启动归位 (Homing) ===
+            if (!is_homing_complete) {
+                // 获取 Planner 默认的标准站立姿态
+                // 此时 planner 处于 reset 状态，输出的就是 DEFAULT_ANGLE 定义的姿态
+                std::vector<double> stand_target;
+                planner.getJointTargets(stand_target);
+                
+                // 计算进度 (0.0 -> 1.0)
+                double progress = current_sim_time / homing_duration;
+                
+                if (progress < 1.0) {
+                    // 平滑插值：从 spawn_qpos 慢慢过渡到 stand_target
+                    // 使用 smoothstep 让起止更柔和: t * t * (3 - 2 * t)
+                    double smooth_t = progress * progress * (3 - 2 * progress);
+                    
+                    for (int i = 0; i < num_actuators; ++i) {
+                        control_target[i] = lerp(spawn_qpos[i], stand_target[i], smooth_t);
+                    }
+                } else {
+                    // 归位完成
+                    is_homing_complete = true;
+                    // 同步 planner 状态，防止瞬间跳变
+                    planner.setCurrentState(current_state);
+                    std::cout << "Homing Complete. Robot Standing." << std::endl;
+                }
+                
+                // 累加时间
+                current_sim_time += kSimulationDt;
+            } 
+            // === 阶段二：正常控制逻辑 ===
+            else {
                     if (!is_control_active && local_motion != control::BasicMotion::kStand) {
                 std::cout << "Motion Command Received. Activating Planner..." << std::endl;
                 is_control_active = true;
@@ -223,34 +272,12 @@ int main(int argc, char** argv) {
                 planner.getJointTargets(control_target);
                 robot.updatePlotData(control_target);
             } else {
-                // === [核心] 静止保持逻辑 (Servo Hold) ===
-                // 还没有激活时，目标 = 当前位置
-                // 这利用了 PD 控制器的特性，将电机锁死在当前角度，保持绝对静止
-                if (current_state.qpos.size() >= num_actuators) {
-                    // 注意：MuJoCo 的 qpos 前7位是基座位置姿态，关节角度从第7位开始 (offset=7)
-                    // 需要根据你的 RobotSim 实现确认 qpos 的结构。
-                    // 假如 RobotSim::getState 已经处理好了只返回关节角度，则直接拷贝。
-                    // 但通常 getState 返回的是完整 qpos。
-                    
-                    // 这里需要特别注意 LegIndexHelper 的转换，或者直接透传
-                    // 简单做法：假设 control_target 对应 qpos 的后 12 位
-                    // 更加稳健的做法是：
-                    
-                    // 临时方案：直接让所有电机维持当前读数
-                    // 假设 num_actuators = 12, qpos 包含 floating base (7) + 12 joints
-                    // 请务必确认 RobotSim::getState 中 qpos 的定义
-                    
-                    // 如果 RobotSim::getState 返回的是纯关节角度：
-                    // control_target = current_state.qpos;
-                    
-                    // 如果 RobotSim::getState 返回的是完整 MuJoCo qpos (7 + 12)：
-                    for(int i=0; i<num_actuators; ++i) {
-                         // MuJoCo qpos offset = 7 (3 pos + 4 quat)
-                         control_target[i] = current_state.qpos[7 + i]; 
-                    }
-                }
+                // 待机状态：继续由 Planner 输出 Stand 姿态
+                    // 因为已经归位了，Planner 的默认输出就是 Stand，所以直接用即可
+                    // 这样比 "死锁当前位置" 更抗干扰，因为它会主动纠正回标准姿态
+                    planner.getJointTargets(control_target);
             }
-                
+        }    
                 
                 } else {
                     // Raw 模式直接透传
