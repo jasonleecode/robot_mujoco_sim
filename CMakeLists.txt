@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(MujocoDDSExample)
+project(RobotSim)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,7 +45,7 @@ find_package(OpenCV REQUIRED)
 add_subdirectory(planner)
 
 # === 添加可执行文件 ===
-add_executable(MujocoDDSExample
+add_executable(RobotSim
     src/main.cpp
     src/RobotSim.cpp
     src/RobotSim.hpp
@@ -54,7 +54,7 @@ add_executable(MujocoDDSExample
 )
 
 # === 包含头文件 ===
-target_include_directories(MujocoDDSExample PRIVATE 
+target_include_directories(RobotSim PRIVATE 
     "${MUJOCO_FRAMEWORK}/Headers"           # MuJoCo Headers
     ${CycloneDDS_INCLUDE_DIRS}              # CycloneDDS Headers
     "${CMAKE_CURRENT_SOURCE_DIR}/src/dds_generated"
@@ -73,7 +73,7 @@ set(MUJOCO_PLATFORM_LIBS
 )
 
 # === 链接库 ===
-target_link_libraries(MujocoDDSExample PRIVATE 
+target_link_libraries(RobotSim PRIVATE 
     ${MUJOCO_PLATFORM_LIBS} 
     CycloneDDS::ddsc
     ${OpenCV_LIBS} 

@@ -49,6 +49,8 @@ enum OrientCntrlLegs
 class LegMover
 {
 public:
+
+    // EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     /**
      * @brief Constructor for the LegMover class.
      *

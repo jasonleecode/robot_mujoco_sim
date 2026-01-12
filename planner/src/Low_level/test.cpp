@@ -14,8 +14,6 @@ int main(int argc, char **argv) {
 	Robot myRobot;
 	auto legMover = std::make_shared<LegMover>(&myRobot, "Test_Node");
 
-
-
     /* std::vector<double> jointAngles({
         -0.13000117242336273,
         1.2262111902236938,
@@ -30,8 +28,6 @@ int main(int argc, char **argv) {
         1.245980143547058,
         -2.7229092121124268
 }); */
-
-
 
     std::vector<double> jointAngles({
         -0.0264951,
@@ -57,6 +53,5 @@ int main(int argc, char **argv) {
     //legMover->straightMover();
     legMover->swingMover();
     
-	
 	return 0;
 }

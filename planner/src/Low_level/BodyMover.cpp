@@ -6,6 +6,7 @@
  */
 
 #include "Low_level/BodyMover.h"
+#include <cassert>
 
 BodyMover::BodyMover(Robot *robotModel, std::string nodeName):
 StateMonitor(robotModel, nodeName), robotModel(robotModel)

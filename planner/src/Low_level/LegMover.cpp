@@ -33,10 +33,10 @@ void LegMover::straightMover()
         countDown = 0;
         motionType = MOTION_TYPE_NUM;
 
-        /* Eigen::Vector3d curAngles = get_qTarg();
+        Eigen::Vector3d curAngles = get_qTarg();
         Eigen::Vector3d straightDirection_d = targPos - leg->getPosition();
         curAngles = leg->getKinematics()->jointAngleCompute(curAngles, straightDirection_d);
-        set_qTarg(leg->enforceJointLim(curAngles)); */
+        set_qTarg(leg->enforceJointLim(curAngles));
 
         return;
     }
@@ -190,17 +190,11 @@ void LegMover::moveLegSwing(Eigen::Vector3d direction, float swingHeight, int du
 
 	swingSpline = Eigen::SplineFitting<Eigen::Spline<double, 1>>::Interpolate(y.transpose(), 4, x);
     
-    //std::cout << "I'm here" << std::endl;
-
-    
-
-    
+    //std::cout << "I'm here" << std::endl;  
 }
 
 void LegMover::swingMover()
 {
-    
-
     if (swingPhase == 0) // Return when the phase is complete
     {
         countDown = 0;
@@ -260,8 +254,6 @@ void LegMover::swingMover()
         qTarg[curLegPos + j] = qt[j];
         lowCmdMsg.motor_cmd[curLegPos + j].q = qt[j];
     } */
-
-    
 
     //for (int i = curLegPos, j = 0; i < curLegPos + JOINT_NUM; i++, j++)
     //    lowCmdMsg.motor_cmd[i].q = legAngles[j];

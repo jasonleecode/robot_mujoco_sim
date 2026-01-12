@@ -26,7 +26,7 @@ public:
     mjUI ui0;
     mjUI ui1;
     mjuiState uistate;
-    int ui0_enable = 1;
+    int ui0_enable = 0;
     int ui1_enable = 0;
     int help = 0;
     int info = 0;
@@ -112,10 +112,13 @@ private:
     static void mouse_button(GLFWwindow* window, int button, int action, int mods);
     static void mouse_move(GLFWwindow* window, double xpos, double ypos);
     static void scroll(GLFWwindow* window, double xoffset, double yoffset);
+    static void keyboard(GLFWwindow* window, int key, int scancode, int act, int mods);
 
     // 内部实现
     void drawSensorOverlay(const mjrRect& viewport);
     void handle_mouse_button(int button, int action, int mods);
     void handle_mouse_move(double xpos, double ypos);
     void handle_scroll(double xoffset, double yoffset);
+    void handle_keyboard(int key, int scancode, int act, int mods);
+    void renderUI(const mjrRect& viewport);
 };

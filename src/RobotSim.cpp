@@ -1,6 +1,7 @@
 #include "RobotSim.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -61,6 +62,10 @@ RobotSim::RobotSim(const std::string &xml_path) {
     glfwSetMouseButtonCallback(window, mouse_button);
     glfwSetCursorPosCallback(window, mouse_move);
     glfwSetScrollCallback(window, scroll);
+    glfwSetKeyCallback(window, keyboard);
+
+    // --- 5. 初始化 UI ---
+    initializeUI();
 }
 
 RobotSim::~RobotSim() {
@@ -125,16 +130,41 @@ void RobotSim::renderFrame() {
 
         // 更新主场景 (这是 CPU 操作，拷贝 mjData -> mjvScene)
         mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
+        
+        // 更新 info 文本
+        updateInfoText();
     } 
     // --- 锁释放：物理线程现在可以继续运行了 ---
 
-    // --- 渲染阶段 (GPU 操作，耗时但无需锁住 mjData) ---
-    mjr_render(viewport, &scn, &con);
+    // --- 计算 UI 布局 ---
+    mjrRect rect_ui0 = {0, 0, 0, 0};
+    mjrRect rect_ui1 = {0, 0, 0, 0};
+    mjrRect rect_scene = viewport;
+    
+    if (ui0_enable) {
+        rect_ui0.left = 0;
+        rect_ui0.bottom = 0;
+        rect_ui0.width = ui0.width;
+        rect_ui0.height = viewport.height;
+        rect_scene.left = ui0.width;
+        rect_scene.width -= ui0.width;
+    }
+    
+    if (ui1_enable) {
+        rect_ui1.width = ui1.width;
+        rect_ui1.left = viewport.width - ui1.width;
+        rect_ui1.bottom = 0;
+        rect_ui1.height = viewport.height;
+        rect_scene.width -= ui1.width;
+    }
 
-    // 绘制图表
-    fig_rect.left = 10;
+    // --- 渲染阶段 (GPU 操作，耗时但无需锁住 mjData) ---
+    mjr_render(rect_scene, &scn, &con);
+
+    // 绘制图表 (在场景区域内)
+    fig_rect.left = rect_scene.left + 10;
     fig_rect.bottom = 10;
-    fig_rect.width = viewport.width / 2 - 20; 
+    fig_rect.width = rect_scene.width / 2 - 20; 
     fig_rect.height = viewport.height / 3;
     
     // 注意：fig 也在物理线程被写入，理论上需要锁。
@@ -143,6 +173,9 @@ void RobotSim::renderFrame() {
 
     // 绘制传感器覆盖层
     drawSensorOverlay(viewport);
+
+    // --- 渲染 UI 面板 ---
+    renderUI(viewport);
 
     // 刷新屏幕
     glfwSwapBuffers(window);
@@ -426,7 +459,198 @@ int RobotSim::getNumActuators() const {
     return m ? m->nu : 0;
 }
 
-// 定义初始化UI函数（虽然现在可能没用到，但保持完整性）
-void RobotSim::initializeUI() {}
-void RobotSim::updateInfoText() {}
-void RobotSim::takeScreenshot() {}
+// 初始化 UI
+void RobotSim::initializeUI() {
+    // 清空 UI 结构
+    std::memset(&ui0, 0, sizeof(ui0));
+    std::memset(&ui1, 0, sizeof(ui1));
+    std::memset(&uistate, 0, sizeof(uistate));
+
+    // 设置 UI 主题
+    ui0.spacing = mjui_themeSpacing(spacing);
+    ui0.color = mjui_themeColor(color);
+    ui1.spacing = mjui_themeSpacing(spacing);
+    ui1.color = mjui_themeColor(color);
+
+    // UI0: 左侧面板 - Option 和 Simulation 部分
+    mjuiDef defOption[] = {
+        {mjITEM_SECTION,  "Option",       mjPRESERVE, nullptr, "AO"},
+        {mjITEM_CHECKINT, "Help",         2, &help,     " #290"},
+        {mjITEM_CHECKINT, "Info",         2, &info,     " #291"},
+        {mjITEM_CHECKINT, "Profiler",     2, &profiler, " #292"},
+        {mjITEM_CHECKINT, "VSync",        1, &vsync,    ""},
+        {mjITEM_SELECT,   "Spacing",      1, &spacing,  "Tight\nWide"},
+        {mjITEM_SELECT,   "Color",        1, &color,    "Default\nOrange\nWhite\nBlack"},
+        {mjITEM_SELECT,   "Font",         1, &font,     "50 %\n100 %\n150 %\n200 %\n250 %\n300 %"},
+        {mjITEM_END}
+    };
+
+    mjuiDef defSimulation[] = {
+        {mjITEM_SECTION,   "Simulation",   mjPRESERVE, nullptr, "AS"},
+        {mjITEM_RADIO,     "",             5, &run,      "Pause\nRun"},
+        {mjITEM_BUTTON,    "Reset",        2, nullptr,   " #259"},
+        {mjITEM_BUTTON,    "Screenshot",   2, nullptr,   "CP"},
+        {mjITEM_SEPARATOR, "Speed",        1},
+        {mjITEM_SLIDERINT, "RT Index",     2, &real_time_index, "0 26"},
+        {mjITEM_END}
+    };
+
+    mjuiDef defWatch[] = {
+        {mjITEM_SECTION,   "Watch",        mjPRESERVE, nullptr, "AW"},
+        {mjITEM_STATIC,    "Time",         2, nullptr,   " "},
+        {mjITEM_STATIC,    "FPS",          2, nullptr,   " "},
+        {mjITEM_END}
+    };
+
+    // 添加到 ui0
+    mjui_add(&ui0, defOption);
+    mjui_add(&ui0, defSimulation);
+    mjui_add(&ui0, defWatch);
+    ui0.sect[0].state = 1;  // Option section expanded
+    ui0.sect[1].state = 1;  // Simulation section expanded
+
+    // UI1: 右侧面板 - 关节控制
+    mjuiDef defJoint[] = {
+        {mjITEM_SECTION, "Joint Control", mjPRESERVE, nullptr, "AJ"},
+        {mjITEM_END}
+    };
+    mjui_add(&ui1, defJoint);
+    ui1.sect[0].state = 1;
+
+    // 添加关节滑块
+    if (m) {
+        mjuiDef defSlider[] = {
+            {mjITEM_SLIDERNUM, "", 2, nullptr, "0 1"},
+            {mjITEM_END}
+        };
+        defSlider[0].state = 4;
+
+        for (int i = 0; i < m->njnt && i < mjMAXUIITEM - 2; i++) {
+            if (m->jnt_type[i] == mjJNT_HINGE || m->jnt_type[i] == mjJNT_SLIDE) {
+                defSlider[0].pdata = &d->qpos[m->jnt_qposadr[i]];
+                const char* jnt_name = mj_id2name(m, mjOBJ_JOINT, i);
+                if (jnt_name) {
+                    std::strncpy(defSlider[0].name, jnt_name, mjMAXUINAME - 1);
+                } else {
+                    std::snprintf(defSlider[0].name, mjMAXUINAME, "joint %d", i);
+                }
+                // 设置范围
+                if (m->jnt_limited[i]) {
+                    std::snprintf(defSlider[0].other, mjMAXUITEXT, "%.4g %.4g",
+                                  m->jnt_range[2*i], m->jnt_range[2*i+1]);
+                } else {
+                    std::strncpy(defSlider[0].other, "-3.14 3.14", mjMAXUITEXT - 1);
+                }
+                mjui_add(&ui1, defSlider);
+            }
+        }
+    }
+
+    // 调整 UI 大小
+    mjui_resize(&ui0, &con);
+    mjui_resize(&ui1, &con);
+}
+
+void RobotSim::updateInfoText() {
+    // 更新 info 显示
+    std::snprintf(info_title, sizeof(info_title), "RobotSim Info");
+    double time_val = d ? d->time : 0.0;
+    std::snprintf(info_content, sizeof(info_content),
+                  "Time: %.3f s\n"
+                  "Speed: %.1f%%\n"
+                  "Actuators: %d",
+                  time_val,
+                  real_time_index >= 0 && real_time_index < kNumSpeedOptions ?
+                      percentRealTime[real_time_index] : 100.0f,
+                  m ? m->nu : 0);
+}
+
+void RobotSim::takeScreenshot() {
+    // 请求截图
+    screenshotrequest.store(1);
+}
+
+// 静态键盘回调
+void RobotSim::keyboard(GLFWwindow* window, int key, int scancode, int act, int mods) {
+    RobotSim* sim = static_cast<RobotSim*>(glfwGetWindowUserPointer(window));
+    if (sim) sim->handle_keyboard(key, scancode, act, mods);
+}
+
+void RobotSim::handle_keyboard(int key, int scancode, int act, int mods) {
+    if (act != GLFW_PRESS && act != GLFW_REPEAT) return;
+
+    // UI 面板切换快捷键
+    switch (key) {
+        case GLFW_KEY_F1:  // Toggle left UI
+            ui0_enable = !ui0_enable;
+            break;
+        case GLFW_KEY_F2:  // Toggle right UI
+            ui1_enable = !ui1_enable;
+            break;
+        case GLFW_KEY_F5:  // Toggle info
+            info = !info;
+            break;
+        case GLFW_KEY_F6:  // Toggle profiler
+            profiler = !profiler;
+            break;
+        case GLFW_KEY_SPACE:  // Pause/Run
+            run = !run;
+            break;
+        case GLFW_KEY_BACKSPACE:  // Reset
+            if (m && d) {
+                std::lock_guard<std::mutex> lock(sim_mutex);
+                mj_resetData(m, d);
+                mj_forward(m, d);
+            }
+            break;
+        case GLFW_KEY_P:  // Screenshot (Ctrl+P)
+            if (mods & GLFW_MOD_CONTROL) {
+                takeScreenshot();
+            }
+            break;
+        case GLFW_KEY_EQUAL:  // Speed up (+)
+            if (real_time_index > 0) real_time_index--;
+            break;
+        case GLFW_KEY_MINUS:  // Speed down (-)
+            if (real_time_index < kNumSpeedOptions - 1) real_time_index++;
+            break;
+        default:
+            break;
+    }
+}
+
+// 渲染 UI 面板
+void RobotSim::renderUI(const mjrRect& viewport) {
+    // UI0: 左侧面板
+    if (ui0_enable) {
+        mjrRect rect_ui0 = {0, 0, ui0.width, viewport.height};
+        mjui_render(&ui0, &uistate, &con);
+    }
+    
+    // UI1: 右侧面板
+    if (ui1_enable) {
+        mjrRect rect_ui1 = {viewport.width - ui1.width, 0, ui1.width, viewport.height};
+        mjui_render(&ui1, &uistate, &con);
+    }
+    
+    // 绘制 Info 覆盖
+    if (info) {
+        mjrRect rect_info = {20, viewport.height - 200, 300, 180};
+        mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, info_title, info_content, &con);
+    }
+    
+    // 绘制 Help 信息
+    if (help) {
+        const char* help_title = "Keyboard Shortcuts";
+        const char* help_content = 
+            "F1: Toggle left UI\n"
+            "F2: Toggle right UI\n"
+            "F5: Toggle info\n"
+            "F6: Toggle profiler\n"
+            "Space: Pause/Run\n"
+            "Backspace: Reset\n"
+            "Ctrl+P: Screenshot\n"
+            "+/-: Speed up/down";
+        mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, viewport, help_title, help_content, &con);
+    }
+}
