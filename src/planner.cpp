@@ -1,11 +1,13 @@
+#include <iostream>
+#include <cmath>
+
 #include "planner.h"
 #include "LegIndexHelper.hpp"
-#include <iostream>
 
 // 构造函数：初始化 planner 库的对象
 SpotPlanner::SpotPlanner() 
     : last_time_(0.0)
-    , mode_(control::BasicMotion::kStand)
+    , mode_(control::BasicMotion::kDefault)
 {
     // 1. 初始化算法模型
     // 注意：TrotGait 的构造函数需要 Robot 指针和 nodeName
@@ -14,10 +16,7 @@ SpotPlanner::SpotPlanner()
 
     // 2. 初始化一些默认参数 (例如步态频率、高度等)
     trot_gait_->setStanceDuration(250);
-    
-    // 3. 在非ROS模式下，设置standing为true，以便步态算法可以执行
-    // standing标志表示机器人已经处于站立状态，可以开始执行步态动作
-    trot_gait_->standing = false;
+
 }
 
 SpotPlanner::~SpotPlanner() {
@@ -25,10 +24,9 @@ SpotPlanner::~SpotPlanner() {
 }
 
 void SpotPlanner::reset() {
-    mode_ = control::BasicMotion::kStand;
-    trot_gait_->setGaitMotion(GaitMotion::STOP);
-    trot_gait_->standing = true;  // 确保standing标志为true
-    // 重置 robot 状态...
+    mode_ = control::BasicMotion::kDefault;
+    trot_gait_->setGaitMotion(GaitMotion::DEFAULT);
+    trot_gait_->active = false;
 }
 
 void SpotPlanner::setMode(control::BasicMotion motion) {
@@ -67,7 +65,7 @@ void SpotPlanner::update(const RobotState& state) {
     // 如果仿真步长是 2ms (500Hz)，而步态逻辑希望 1000Hz 或 500Hz 运行，直接调用即可。
     // 如果需要降频 (比如步态只跑 100Hz)，这里加一个计时器判断。
     
-    if (state.time - last_time_ < 0.002) { 
+    if (state.time - last_time_ < control_dt_) { 
         // 防止过于频繁调用（如果仿真步长极小）
         return; 
     }
@@ -101,26 +99,8 @@ void SpotPlanner::setCurrentState(const RobotState& state) {
 
 // MuJoCo (qpos) -> Planner Robot (q, qd)
 void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
-    // MuJoCo qpos 结构: [0-6] 基座位置姿态, [7-18] 关节角度
-    // MuJoCo qvel 结构: [0-5] 基座速度角速度, [6-17] 关节角速度
-    
-    // 1. 映射基座状态 (如果有 IMU 数据，填入 planner_robot_.body)
-    // planner_robot_.body.pos = ...
-    // planner_robot_.body.rpy = ... (通常 TrotGait 只需要 rpy)
 
-    // 2. 映射关节状态
-    // 假设 MuJoCo 顺序: FL, FR, RL, RR (根据你的 spot_robot_params.h)
-    // 假设 Planner 顺序: FR, FL, RR, RL (TrotGait 的常见顺序)
-    
-    // 我们遍历 MuJoCo 的腿 (i=0:FL, 1:FR...)
     for (int i = 0; i < 4; ++i) {
-        // 使用你的 Helper 找到对应的 Planner 腿索引
-        // 假设 LegIndexHelper::toPlannerIndex(i) 返回对应的 FR/FL...
-        // 这里为了演示，假设简单的一一对应，你需要根据实际情况修改！
-        
-        // 假设:
-        // MuJoCo: 0:FL, 1:FR, 2:RL, 3:RR
-        // Planner: 0:FR, 1:FL, 2:RR, 3:RL
         int planner_leg_idx = -1;
         if(i==0) planner_leg_idx = 1; // FL -> FL(1)
         if(i==1) planner_leg_idx = 0; // FR -> FR(0)
@@ -144,6 +124,18 @@ void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
             state.qvel[mujoco_v_offset + 2]
         ));
     }
+
+    double r, p, y;
+    if (state.imu_quat.size() >= 4) {
+        toEulerAngle(state.imu_quat, r, p, y);
+        
+        // 将解算出的欧拉角设置给内部机器人模型
+        // 这样 TrotGait 在计算平衡时就能知道身体是倾斜的
+        planner_robot_.setOrientation(r, p, y);
+        
+        // 如果你的 Robot 类支持设置角速度，也可以在这里设置
+        // planner_robot_.setAngularVelocity(...) 
+    }
 }
 
 // Planner Robot (q_target) -> qref (发送给 MuJoCo)
@@ -164,4 +156,25 @@ void SpotPlanner::mapPlannerToRef(std::vector<double>& qref) {
         qref[i * 3 + 1] = trot_gait_->qTarg[qTarg_offset + 1];
         qref[i * 3 + 2] = trot_gait_->qTarg[qTarg_offset + 2];
     }
+}
+
+// 辅助函数：四元数转欧拉角 (Roll, Pitch, Yaw)
+// quat: [w, x, y, z]
+void SpotPlanner::toEulerAngle(const std::vector<double>& q, double& roll, double& pitch, double& yaw) {
+    // roll (x-axis rotation)
+    double sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3]);
+    double cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2]);
+    roll = std::atan2(sinr_cosp, cosr_cosp);
+
+    // pitch (y-axis rotation)
+    double sinp = 2 * (q[0] * q[2] - q[3] * q[1]);
+    if (std::abs(sinp) >= 1)
+        pitch = std::copysign(M_PI / 2, sinp); // use 90 degrees if out of range
+    else
+        pitch = std::asin(sinp);
+
+    // yaw (z-axis rotation)
+    double siny_cosp = 2 * (q[0] * q[3] + q[1] * q[2]);
+    double cosy_cosp = 1 - 2 * (q[2] * q[2] + q[3] * q[3]);
+    yaw = std::atan2(siny_cosp, cosy_cosp);
 }

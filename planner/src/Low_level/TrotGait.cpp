@@ -15,27 +15,26 @@ BaseGait(robotModel, nodeName), robotModel(robotModel)
 
 void TrotGait::gaitCallback()
 {
-    if (delay > 0)
-    {
+    if (delay > 0) {
         --delay;
         return;
-    }
-    else
-    {    
+    } else {    
         if (legMovers[FR]->straightPhase || legMovers[FL]->straightPhase ||
             legMovers[RR]->straightPhase || legMovers[RL]->straightPhase)
             return;
 
-        if (standing)
-        {
-            switch (gaitMotion)
-            {
+        if (active) {
+            switch (gaitMotion) {
             case STOP:
                 stand();
                 if ((curTime - gaitStartTime) > 1000)
                     gaitMotion = (GAIT_MOTION_NUM); // Make it stop after 5 secss
                 else
                     writeFile = false;
+            break;
+
+            case STANDUP:
+                stand();
             break;
 
             case FORWARD:
@@ -58,11 +57,14 @@ void TrotGait::gaitCallback()
                 jump();
             break;
             
-            
             default:
                 break;
             }
-        }}
+        } else {
+            // 如果不活跃,保持机器人默认姿态
+            // std::cout << "TrotGait inactive" << std::endl;
+        }
+    }
     
 }
 

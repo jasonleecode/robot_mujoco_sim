@@ -56,6 +56,8 @@ public:
 protected:
 #ifdef ENABLE_ROS
     unitree_go::msg::LowCmd lowCmdMsg; /**< Message to publish low-level commands. */
+#else
+    // LowCmd lowCmdMsg;
 #endif
 
     /**
@@ -101,6 +103,8 @@ private:
      * @param msg Shared pointer to the received LowState message.
      */
     void stateUpdateCallback(const unitree_go::msg::LowState::SharedPtr msg);
+#else
+    void stateUpdateCallback();
 #endif
 
     /**
@@ -142,7 +146,7 @@ private:
     /**
      * @brief Writes diagnostic data to a file.
      */
-    void writeToFile();
+    void writeIMUToFile();
 
     uint32_t phase = 0; /**< Current phase of the robot's operation. */
 

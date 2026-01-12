@@ -31,11 +31,13 @@
 enum GaitMotion
 {
     STOP,
+    STANDUP,
     FORWARD,
     BACKWARD,
     LEFT,
     RIGHT,
     JUMP,
+    DEFAULT,
     GAIT_MOTION_NUM
 };
 

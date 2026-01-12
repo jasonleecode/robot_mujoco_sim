@@ -17,6 +17,7 @@ enum class BasicMotion : uint32_t {
     kCrouch,
     kStand,
     kJump,
+    kDefault,
     kCount
 };
 

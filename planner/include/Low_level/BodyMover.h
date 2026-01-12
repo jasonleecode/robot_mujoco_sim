@@ -106,7 +106,7 @@ public:
      */
     ~BodyMover();
     LegMover *legMovers[LEG_NUM]; /**< Array of LegMover pointers, one for each leg. */
-    bool standing = false;        /**< Boolean flag indicating if the robot is standing. */
+    bool standing = false;        /**< Boolean flag indicating if the robot is active. */
 
 protected:
     float nominalHeight = NOMINAL_HEIGHT; /**< Nominal height of the robot when standing. */

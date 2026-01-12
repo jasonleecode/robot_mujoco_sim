@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
         
         // 注意：SpotPlanner 现在完全属于物理线程，不需要锁
         SpotPlanner planner;
-        planner.reset();
+        planner.setControlFrequency(kSimulationDt);
         
         bool warned_clamp = false;
 
@@ -182,6 +182,8 @@ int main(int argc, char** argv) {
             bool local_use_planner = true;
             control::BasicMotion local_motion = control::BasicMotion::kStand;
             std::vector<double> local_raw_values(num_actuators, 0.0);
+
+            bool is_control_active = false;
 
             // 计时器
             auto next_tick = steady_clock::now();
@@ -203,17 +205,53 @@ int main(int argc, char** argv) {
 
                 // 3. 计算控制输出
                 if (local_use_planner) {
-                    // 更新 Planner 模式
-                    if (planner.mode() != local_motion) {
-                        planner.setMode(local_motion);
+                    if (!is_control_active && local_motion != control::BasicMotion::kStand) {
+                std::cout << "Motion Command Received. Activating Planner..." << std::endl;
+                is_control_active = true;
+                
+                // [关键] 激活瞬间，强制同步 Planner 内部状态到当前真实状态
+                // 防止激活瞬间再次发生跳变
+                planner.setCurrentState(current_state); 
+            }
+
+            if (is_control_active) {
+                // === 正常规划逻辑 ===
+                if (planner.mode() != local_motion) {
+                    planner.setMode(local_motion);
+                }
+                planner.update(current_state);
+                planner.getJointTargets(control_target);
+                robot.updatePlotData(control_target);
+            } else {
+                // === [核心] 静止保持逻辑 (Servo Hold) ===
+                // 还没有激活时，目标 = 当前位置
+                // 这利用了 PD 控制器的特性，将电机锁死在当前角度，保持绝对静止
+                if (current_state.qpos.size() >= num_actuators) {
+                    // 注意：MuJoCo 的 qpos 前7位是基座位置姿态，关节角度从第7位开始 (offset=7)
+                    // 需要根据你的 RobotSim 实现确认 qpos 的结构。
+                    // 假如 RobotSim::getState 已经处理好了只返回关节角度，则直接拷贝。
+                    // 但通常 getState 返回的是完整 qpos。
+                    
+                    // 这里需要特别注意 LegIndexHelper 的转换，或者直接透传
+                    // 简单做法：假设 control_target 对应 qpos 的后 12 位
+                    // 更加稳健的做法是：
+                    
+                    // 临时方案：直接让所有电机维持当前读数
+                    // 假设 num_actuators = 12, qpos 包含 floating base (7) + 12 joints
+                    // 请务必确认 RobotSim::getState 中 qpos 的定义
+                    
+                    // 如果 RobotSim::getState 返回的是纯关节角度：
+                    // control_target = current_state.qpos;
+                    
+                    // 如果 RobotSim::getState 返回的是完整 MuJoCo qpos (7 + 12)：
+                    for(int i=0; i<num_actuators; ++i) {
+                         // MuJoCo qpos offset = 7 (3 pos + 4 quat)
+                         control_target[i] = current_state.qpos[7 + i]; 
                     }
-                    
-                    // 运行步态规划算法
-                    planner.update(current_state);
-                    planner.getJointTargets(control_target);
-                    
-                    // 将目标值发送给 RobotSim 用于绘图 (线程安全)
-                    robot.updatePlotData(control_target);
+                }
+            }
+                
+                
                 } else {
                     // Raw 模式直接透传
                     control_target = local_raw_values;

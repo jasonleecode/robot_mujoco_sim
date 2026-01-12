@@ -9,6 +9,12 @@
 #include "ControlActions.hpp"
 #include "planner.h"
 
+struct IMUData {
+    double orientation[4]; // 四元数 (w, x, y, z)
+    double gyro[3];        // 角速度 (x, y, z)
+    double accel[3];       // 加速度 (x, y, z)
+};
+
 class RobotSim {
 public:
     mjrContext con;
@@ -69,6 +75,7 @@ public:
     
     // 辅助功能
     void applyBasicMotion(control::BasicMotion motion, std::vector<double>& control) const;
+    void getIMUData(IMUData& data, const std::string& prefix);
     void getCameraImages(const std::string& camera_name, int width, int height, 
                         std::vector<unsigned char>& rgb_output, 
                         std::vector<float>& depth_output);
@@ -85,6 +92,8 @@ public:
 private:
     mjModel* m = nullptr;
     mjData* d = nullptr;
+
+    IMUData current_imu;
     
     GLFWwindow* window = nullptr;
     mjvCamera cam;
@@ -107,6 +116,8 @@ private:
     
     // 核心互斥锁：保护 mjData 和 plot_data
     mutable std::mutex sim_mutex;
+
+    void getIMUDataInternal(IMUData& data, const std::string& sensor_name_prefix);
     
     // 静态回调
     static void mouse_button(GLFWwindow* window, int button, int action, int mods);

@@ -89,6 +89,9 @@ void RobotSim::stepPhysics() {
     std::lock_guard<std::mutex> lock(sim_mutex);
     if (!m || !d) return;
     mj_step(m, d);
+
+    // 更新当前 IMU 数据
+    getIMUDataInternal(this->current_imu, "imu_");
 }
 
 // 应用完整的控制向量
@@ -124,6 +127,9 @@ void RobotSim::renderFrame() {
     // --- 临界区 1: 访问 mjData 和更新 Scene ---
     {
         std::lock_guard<std::mutex> lock(sim_mutex);
+
+        // 根据IMU数据做姿态解算
+
         
         // 获取相机图像 (这也需要 mjData 来更新 scene_sensor)
         getCameraImages("tof_cam", cam_w, cam_h, cam_rgb_vec, cam_depth_vec);
@@ -260,6 +266,46 @@ void RobotSim::drawSensorOverlay(const mjrRect& viewport) {
 // 辅助函数: 深度缓冲转换
 float zbuffer_to_meters(float depth_val, float znear, float zfar) {
     return znear / (1.0f - depth_val * (1.0f - znear / zfar));
+}
+
+// 获取IMU数据
+void RobotSim::getIMUData(IMUData& data, const std::string& prefix) {
+    // 必须加锁，因为 physics_loop 和 main 线程可能会同时访问 mjData
+    std::lock_guard<std::mutex> lock(sim_mutex);
+    getIMUDataInternal(data, prefix);
+}
+
+void RobotSim::getIMUDataInternal(IMUData& data, const std::string& prefix) {
+    if (!m || !d) return;
+
+    // 1. 读取四元数 (Frame Quaternion)
+    int id_quat = mj_name2id(m, mjOBJ_SENSOR, (prefix + "quat").c_str());
+    if (id_quat != -1) {
+        int adr = m->sensor_adr[id_quat];
+        // MuJoCo 四元数通常是 [w, x, y, z]
+        data.orientation[0] = d->sensordata[adr + 0];
+        data.orientation[1] = d->sensordata[adr + 1];
+        data.orientation[2] = d->sensordata[adr + 2];
+        data.orientation[3] = d->sensordata[adr + 3];
+    }
+
+    // 2. 读取角速度 (Gyro)
+    int id_gyro = mj_name2id(m, mjOBJ_SENSOR, (prefix + "gyro").c_str());
+    if (id_gyro != -1) {
+        int adr = m->sensor_adr[id_gyro];
+        data.gyro[0] = d->sensordata[adr + 0];
+        data.gyro[1] = d->sensordata[adr + 1];
+        data.gyro[2] = d->sensordata[adr + 2];
+    }
+
+    // 3. 读取加速度 (Accelerometer)
+    int id_acc = mj_name2id(m, mjOBJ_SENSOR, (prefix + "acc").c_str());
+    if (id_acc != -1) {
+        int adr = m->sensor_adr[id_acc];
+        data.accel[0] = d->sensordata[adr + 0];
+        data.accel[1] = d->sensordata[adr + 1];
+        data.accel[2] = d->sensordata[adr + 2];
+    }
 }
 
 // 获取相机数据

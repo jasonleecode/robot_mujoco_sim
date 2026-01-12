@@ -106,6 +106,8 @@ public:
      */
     ~TrotGait();
 
+    bool active = false;
+
 private:
     Robot *robotModel; /**< Pointer to the Robot object used for managing robot state. */
 
@@ -158,6 +160,8 @@ private:
      * This method calculates and applies the necessary leg movements for the jump motion.
      */
     void jump();
+
+    
     /* void gaitParamsCallback(go2_gait_planner::msg::GaitParam::SharedPtr gaitParamsMsg);
     void setStanceDuration(int val);
     void setStanceDepth(float val);

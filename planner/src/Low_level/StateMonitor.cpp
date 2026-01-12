@@ -43,7 +43,6 @@ StateMonitor::StateMonitor(Robot *robotModel, std::string nodeName)
 #ifdef ENABLE_ROS
 void StateMonitor::init_cmd()
 {
-    
     lowCmdMsg.head = {254, 239};
     lowCmdMsg.level_flag = 255;
     lowCmdMsg.gpio = 0;
@@ -165,9 +164,62 @@ void StateMonitor::stateUpdateCallback(const unitree_go::msg::LowState::SharedPt
         writeToFile();
     
 }
+
+#else
+
+void StateMonitor::stateUpdateCallback()
+{
+    std::vector<double> jointAngles;
+    std::vector<double> jointVels;
+    std::vector<double> jointTaus;
+    std::vector<double> jointKps;
+    std::vector<double> jointKds;
+/*
+    for (int leg = 0; leg < LEG_NUM; leg++)
+    {
+        int curLegPos = JOINT_NUM * leg;
+        for (int joint = 0; joint < JOINT_NUM; joint++)
+        {   
+            double estAngle;
+            try {
+                estAngle = robotModel->legs[leg]->joints[joint]->enforceLim(msg->motor_state[curLegPos + joint].q);
+            }
+            catch (std::exception &e)
+            {
+                return;
+            }
+            jointAngles.push_back(estAngle);
+            jointVels.push_back(msg->motor_state[curLegPos + joint].dq);
+            jointTaus.push_back(msg->motor_state[curLegPos + joint].tau_est);
+            // std::cout << jointAngles[i] << " ";
+        }
+    }
+    // std::cout << std::endl;
+    robotModel->setAngles(jointAngles);
+    robotModel->setVels(jointVels);
+    robotModel->setTaus(jointTaus);
+
+    std::vector<float> quat({
+                            msg->imu_state.quaternion[0],
+                            msg->imu_state.quaternion[1],
+                            msg->imu_state.quaternion[2],
+                            msg->imu_state.quaternion[3]
+                            });
+                            
+    auto eulerAngles = quatToEuler(quat);
+
+    robotModel->setOrientation(
+                               eulerAngles[0],
+                               eulerAngles[1],
+                               eulerAngles[2]
+    );
+*/
+    if (writeFile) writeIMUToFile();
+}
+
 #endif
 
-void StateMonitor::writeToFile()
+void StateMonitor::writeIMUToFile()
 {
     if ((curTime - startTime) > simTime)
         writeFile = false;
