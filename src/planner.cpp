@@ -24,10 +24,15 @@ void SpotPlanner::reset() {
   mode_ = control::BasicMotion::kDefault;
   trot_gait_->setGaitMotion(GaitMotion::DEFAULT);
   trot_gait_->active = false;
+  // 重置跌倒状态
+  is_fallen_ = false;
 }
 
 void SpotPlanner::setMode(control::BasicMotion motion) {
   mode_ = motion;
+
+  is_fallen_ = false;
+
   if (trot_gait_) {
     trot_gait_->active = true;
   }
@@ -59,28 +64,63 @@ void SpotPlanner::setMode(control::BasicMotion motion) {
 
 // 核心：状态同步 -> 步态计算
 void SpotPlanner::update(const RobotState& state) {
-  // 1. 控制调用频率
-  // TrotGait 内部并没有频率控制，它依赖外部调用的间隔。
-  // 如果仿真步长是 2ms (500Hz)，而步态逻辑希望 1000Hz 或 500Hz 运行，直接调用即可。
-  // 如果需要降频 (比如步态只跑 100Hz)，这里加一个计时器判断。
-
-  if (state.time - last_time_ < control_dt_) {
-    // 防止过于频繁调用（如果仿真步长极小）
+  // 1. 频率控制 (保持不变)
+  if (state.time - last_time_ < control_dt_)
     return;
-  }
   last_time_ = state.time;
 
-  // 2. 将 MuJoCo 的真实状态 (反馈) 填入 planner_robot_
+  // 2. 状态映射 (保持不变)
   mapMujocoToPlanner(state);
 
-  // 3. 在非ROS模式下，需要手动调用legMovers的mover()来更新straightPhase和swingPhase
-  // 在ROS模式下，这些由定时器调用，但在非ROS模式下需要手动调用
+  // --- [修改] 跌倒检测逻辑 (基于重力投影) ---
+  // 目标：检查机器人本体 Z 轴在世界坐标系 Z 轴上的投影分量
+  // 这是一个纯几何计算，比欧拉角更稳定
+
+  // 获取当前四元数 (w, x, y, z)
+  // 注意：state.imu_quat 顺序是 [w, x, y, z]
+  double w = state.imu_quat[0];
+  double x = state.imu_quat[1];
+  double y = state.imu_quat[2];
+  double z = state.imu_quat[3];
+
+  // 计算旋转矩阵的 R33 元素 (即 Body-Z 在 World-Z 上的投影)
+  // 公式：R33 = 1 - 2*(x^2 + y^2)
+  double z_projection = 1.0 - 2.0 * (x * x + y * y);
+
+  // 阈值设定：
+  // 1.0  = 直立
+  // 0.5  = 倾斜 60度
+  // 0.0  = 侧躺 (90度)
+  // -1.0 = 肚子朝上 (180度)
+  const double FALL_THRESHOLD = 0.5;
+
+  if (z_projection < FALL_THRESHOLD) {
+    if (!is_fallen_) {
+      std::cout << "[WARNING] Fall Detected! (Z-Projection: " << z_projection << ")" << std::endl;
+      if (z_projection < 0)
+        std::cout << "Status: Upside Down (肚子朝上)" << std::endl;
+      else
+        std::cout << "Status: Tilted/Side Lying (侧身/倾斜)" << std::endl;
+
+      std::cout << "Gait Planner Stopped." << std::endl;
+
+      is_fallen_ = true;
+
+      if (trot_gait_) {
+        trot_gait_->active = false;
+      }
+    }
+  }
+
+  if (is_fallen_) {
+    return;
+  }
+  // ------------------------------------------
+
+  // 3. 正常步态更新 (保持不变)
   for (int i = 0; i < 4; ++i) {
     trot_gait_->legMovers[i]->mover();
   }
-
-  // 4. 运行一步步态规划
-  // 这会更新 planner_robot_.legs[i]->q_target
   trot_gait_->runStep();
 }
 
@@ -126,14 +166,16 @@ void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
   double r, p, y;
   if (state.imu_quat.size() >= 4) {
     toEulerAngle(state.imu_quat, r, p, y);
-
-    // 将解算出的欧拉角设置给内部机器人模型
-    // 这样 TrotGait 在计算平衡时就能知道身体是倾斜的
-    planner_robot_.setOrientation(r, p, y);
-
-    // 如果你的 Robot 类支持设置角速度，也可以在这里设置
-    // planner_robot_.setAngularVelocity(...)
   }
+
+  double world_vx = state.qvel[0];
+  double world_vy = state.qvel[1];
+
+  // 旋转到机身坐标系 (简化版，仅考虑 Yaw)
+  double body_vx = cos(y) * world_vx + sin(y) * world_vy;
+  double body_vy = -sin(y) * world_vx + cos(y) * world_vy;
+
+  planner_robot_.setLinearVelocity(body_vx, body_vy, 0);
 }
 
 // Planner Robot (q_target) -> qref (发送给 MuJoCo)

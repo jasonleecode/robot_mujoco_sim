@@ -56,6 +56,11 @@ class SpotPlanner {
     control_dt_ = dt;
   }
 
+  // 检查是否处于跌倒保护状态
+  bool isFallen() const {
+    return is_fallen_;
+  }
+
  private:
   // [关键] 内部持有一个 planner 库定义的 Robot 实例
   // 注意：这个 Robot 是纯算法模型，不是 MuJoCo 的 mjModel
@@ -67,6 +72,8 @@ class SpotPlanner {
 
   control::BasicMotion mode_;
   double last_time_;
+  // 跌倒标志位
+  bool is_fallen_ = false;
 
   // 辅助：状态映射
   void mapMujocoToPlanner(const RobotState& state);
