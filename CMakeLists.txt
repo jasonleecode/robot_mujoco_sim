@@ -32,6 +32,8 @@ if(NOT EXISTS "${MUJOCO_FRAMEWORK}")
 endif()
 
 # === 查找依赖 ===
+# 1. 查找 OpenGL 包 (通常在文件前面位置)
+find_package(OpenGL REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(CycloneDDS REQUIRED)
 
@@ -75,6 +77,7 @@ set(MUJOCO_PLATFORM_LIBS
 # === 链接库 ===
 target_link_libraries(RobotSim PRIVATE 
     ${MUJOCO_PLATFORM_LIBS} 
+    OpenGL::GL
     CycloneDDS::ddsc
     ${OpenCV_LIBS} 
     planner            # Planner模块

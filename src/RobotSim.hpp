@@ -1,4 +1,10 @@
 #pragma once
+
+// 必须放在最前面，屏蔽 macOS 的 OpenGL 废弃警告
+#ifdef __APPLE__
+#define GL_SILENCE_DEPRECATION
+#endif
+
 #include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>
 
@@ -11,73 +17,66 @@
 #include "ControlActions.hpp"
 #include "planner.h"
 
+// IMU 数据结构
 struct IMUData {
-  double orientation[4];  // 四元数 (w, x, y, z)
-  double gyro[3];         // 角速度 (x, y, z)
-  double accel[3];        // 加速度 (x, y, z)
+  double orientation[4] = {1.0, 0.0, 0.0, 0.0};  // w, x, y, z
+  double gyro[3] = {0.0, 0.0, 0.0};
+  double accel[3] = {0.0, 0.0, 0.0};
 };
 
 class RobotSim {
  public:
   mjrContext con;
 
-  // 图表相关数据
+  // --- 核心仿真数据 ---
+  mjModel* m = nullptr;
+  mjData* d = nullptr;
+
+  // --- UI 系统 ---
+  mjUI ui0;           // 左侧面板
+  mjUI ui1;           // 右侧面板
+  mjuiState uistate;  // UI 交互状态
+
+  // UI 开关与状态
+  int ui0_enable = 1;       // 默认开启左侧
+  int ui1_enable = 1;       // 默认开启右侧
+  int info = 1;             // 左上角信息覆盖层
+  int run = 1;              // 1: 运行, 0: 暂停
+  double time_scale = 1.0;  // 时间缩放
+
+  int check_gravity = 1;
+
+  // 图表数据
   mjvFigure fig;
   mjrRect fig_rect = {0, 0, 0, 0};
-
-  // 数据缓存: [0-3]对应四条腿的关节数据
   float plot_data[4][1000];
   int plot_idx = 0;
   const int kPlotPoints = 1000;
 
-  // UI 状态
-  mjUI ui0;
-  mjUI ui1;
-  mjuiState uistate;
-  int ui0_enable = 1;
-  int ui1_enable = 1;
-  int help = 1;
-  int info = 1;
-  int profiler = 1;
-  int run = 1;
-  int vsync = 1;
-  int spacing = 0;
-  int color = 0;
-  int font = 0;
-  char info_title[512] = {0};
-  char info_content[512] = {0};
-
-  // 速度控制 (UI用)
-  float speed_multiplier = 1.0f;
-  int real_time_index = 15;
-  static constexpr int kNumSpeedOptions = 31;
-  static const float percentRealTime[kNumSpeedOptions];
-
   // 截图请求
   std::atomic<int> screenshotrequest{0};
 
+  // 构造与析构
   RobotSim(const std::string& xml_path);
   ~RobotSim();
 
-  // --- 物理与控制接口 (主要由物理线程调用) ---
+  // --- 物理与控制接口 ---
   void stepPhysics();
   void applyControlVector(const std::vector<double>& control);
   void getState(RobotState& state) const;
   void setControl(int i, double val);
   int getNumActuators() const;
 
-  // [新增] 线程安全的绘图数据更新
   void updatePlotData(const std::vector<double>& qref);
+  void getIMUData(IMUData& data, const std::string& prefix);  // 外部调用（带锁）
 
-  // --- 渲染与窗口接口 (主要由主线程调用) ---
+  // --- 渲染与窗口接口 ---
   void renderFrame();
   bool isWindowOpen() const;
   bool windowShouldClose() const;
   GLFWwindow* getWindow() const;
 
   // 辅助功能
-  void applyBasicMotion(control::BasicMotion motion, std::vector<double>& control) const;
-  void getIMUData(IMUData& data, const std::string& prefix);
   void getCameraImages(const std::string& camera_name, int width, int height,
                        std::vector<unsigned char>& rgb_output, std::vector<float>& depth_output);
 
@@ -85,17 +84,7 @@ class RobotSim {
   void updateInfoText();
   void takeScreenshot();
 
-  // 回调封装
-  void mouse_button(int button, int action, int mods);
-  void mouse_move(double xpos, double ypos);
-  void scroll(double xoffset, double yoffset);
-
  private:
-  mjModel* m = nullptr;
-  mjData* d = nullptr;
-
-  IMUData current_imu;
-
   GLFWwindow* window = nullptr;
   mjvCamera cam;
   mjvOption opt;
@@ -103,22 +92,29 @@ class RobotSim {
   mjvScene scn_sensor;
   mjvPerturb pert;
 
+  IMUData current_imu;  // 内部缓存
   const int cam_w = 640;
   const int cam_h = 480;
   std::vector<unsigned char> cam_rgb_vec;
   std::vector<float> cam_depth_vec;
 
-  // 交互状态
+  // 交互状态缓存
+  double lastx = 0;
+  double lasty = 0;
   bool button_left = false;
   bool button_middle = false;
   bool button_right = false;
-  double lastx = 0;
-  double lasty = 0;
 
-  // 核心互斥锁：保护 mjData 和 plot_data
+  // 核心互斥锁
   mutable std::mutex sim_mutex;
 
+  // 内部无锁函数
   void getIMUDataInternal(IMUData& data, const std::string& sensor_name_prefix);
+
+  void uiModify(mjUI* ui, mjuiState* state, mjrContext* con);
+
+  // UI 内部辅助
+  void updateUiLayout(const mjrRect& viewport);
 
   // 静态回调
   static void mouse_button(GLFWwindow* window, int button, int action, int mods);
@@ -126,11 +122,17 @@ class RobotSim {
   static void scroll(GLFWwindow* window, double xoffset, double yoffset);
   static void keyboard(GLFWwindow* window, int key, int scancode, int act, int mods);
 
-  // 内部实现
-  void drawSensorOverlay(const mjrRect& viewport);
+  // 内部处理
   void handle_mouse_button(int button, int action, int mods);
   void handle_mouse_move(double xpos, double ypos);
   void handle_scroll(double xoffset, double yoffset);
   void handle_keyboard(int key, int scancode, int act, int mods);
-  void renderUI(const mjrRect& viewport);
+
+  // Info 文本缓存
+  char info_title[1024] = {0};
+  char info_content[1024] = {0};
+
+  // 速度选项
+  int real_time_index = 0;
+  static const float percentRealTime[];
 };
