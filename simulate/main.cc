@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef SIMULATE_AS_LIBRARY
+#include <zmq.h>
+#endif
+
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -29,21 +33,22 @@
 #include <mujoco/experimental/usd/usd.h>
 #endif
 #include <mujoco/mujoco.h>
+
+#include "array_safety.h"
 #include "glfw_adapter.h"
 #include "simulate.h"
-#include "array_safety.h"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
 extern "C" {
 #if defined(_WIN32) || defined(__CYGWIN__)
-  #include <windows.h>
+#include <windows.h>
 #else
-  #if defined(__APPLE__)
-    #include <mach-o/dyld.h>
-  #endif
-  #include <errno.h>
-  #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#include <errno.h>
+#include <unistd.h>
 #endif
 }
 
@@ -60,8 +65,13 @@ const int kErrorLength = 1024;          // load error string length
 mjModel* m = nullptr;
 mjData* d = nullptr;
 
-using Seconds = std::chrono::duration<double>;
+// ZeroMQ and model reloading
+std::string current_model_filename;
+std::mutex model_mutex;
+bool model_changed = false;
+std::string new_model_filename;
 
+using Seconds = std::chrono::duration<double>;
 
 //---------------------------------------- plugin handling -----------------------------------------
 
@@ -75,7 +85,7 @@ std::string getExecutableDir() {
     DWORD buf_size = 128;
     bool success = false;
     while (!success) {
-      realpath.reset(new(std::nothrow) char[buf_size]);
+      realpath.reset(new (std::nothrow) char[buf_size]);
       if (!realpath) {
         std::cerr << "cannot allocate memory to store executable path\n";
         return "";
@@ -86,7 +96,7 @@ std::string getExecutableDir() {
         success = true;
       } else if (written == buf_size) {
         // realpath is too small, grow and retry
-        buf_size *=2;
+        buf_size *= 2;
       } else {
         std::cerr << "failed to retrieve executable path: " << GetLastError() << "\n";
         return "";
@@ -119,7 +129,7 @@ std::string getExecutableDir() {
     std::uint32_t buf_size = 128;
     bool success = false;
     while (!success) {
-      realpath.reset(new(std::nothrow) char[buf_size]);
+      realpath.reset(new (std::nothrow) char[buf_size]);
       if (!realpath) {
         std::cerr << "cannot allocate memory to store executable path\n";
         return "";
@@ -160,8 +170,6 @@ std::string getExecutableDir() {
   return "";
 }
 
-
-
 // scan for libraries in the plugin directory to load additional plugins
 void scanPluginLibraries() {
   // check and print plugins that are linked directly into the executable
@@ -180,7 +188,6 @@ void scanPluginLibraries() {
   const std::string sep = "/";
 #endif
 
-
   // try to open the ${EXECDIR}/MUJOCO_PLUGIN_DIR directory
   // ${EXECDIR} is the directory containing the simulate binary itself
   // MUJOCO_PLUGIN_DIR is the MUJOCO_PLUGIN_DIR preprocessor macro
@@ -198,7 +205,6 @@ void scanPluginLibraries() {
         }
       });
 }
-
 
 //------------------------------------------- simulation -------------------------------------------
 
@@ -242,8 +248,8 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
       mju::strcpy_arr(loadError, "could not load binary model");
     }
 #if defined(mjUSEUSD)
-  } else if (extension == ".usda" || extension == ".usd" ||
-             extension == ".usdc" || extension == ".usdz" ) {
+  } else if (extension == ".usda" || extension == ".usd" || extension == ".usdc" ||
+             extension == ".usdz") {
     mnew = mj_loadUSD(filename, nullptr, loadError, kErrorLength);
 #endif
   } else {
@@ -252,8 +258,8 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
     // remove trailing newline character from loadError
     if (loadError[0]) {
       int error_length = mju::strlen_arr(loadError);
-      if (loadError[error_length-1] == '\n') {
-        loadError[error_length-1] = '\0';
+      if (loadError[error_length - 1] == '\n') {
+        loadError[error_length - 1] = '\0';
       }
     }
   }
@@ -283,6 +289,37 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
   return mnew;
 }
 
+//-------------------------------------- model reloading ------------------------------------------
+
+void ReloadModel(mj::Simulate* sim, const std::string& filename) {
+  std::lock_guard<std::mutex> lock(model_mutex);
+
+  // delete current model and data
+  mj_deleteData(d);
+  mj_deleteModel(m);
+  d = nullptr;
+  m = nullptr;
+
+  // load new model
+  sim->LoadMessage(filename.c_str());
+  m = LoadModel(filename.c_str(), *sim);
+  if (m) {
+    d = mj_makeData(m);
+    if (d) {
+      sim->Load(m, d, filename.c_str());
+      mj_forward(m, d);
+      current_model_filename = filename;
+      std::cout << "Model reloaded: " << filename << std::endl;
+    } else {
+      sim->LoadMessageClear();
+      std::cerr << "Failed to create data for model: " << filename << std::endl;
+    }
+  } else {
+    sim->LoadMessageClear();
+    std::cerr << "Failed to load model: " << filename << std::endl;
+  }
+}
+
 // simulate in background thread (while rendering in main thread)
 void PhysicsLoop(mj::Simulate& sim) {
   // cpu-sim synchronization point
@@ -291,13 +328,25 @@ void PhysicsLoop(mj::Simulate& sim) {
 
   // run until asked to exit
   while (!sim.exitrequest.load()) {
+    // check for model change request from ZeroMQ
+    if (model_changed) {
+      std::string filename_to_load;
+      {
+        std::lock_guard<std::mutex> lock(model_mutex);
+        filename_to_load = new_model_filename;
+        model_changed = false;
+      }
+      ReloadModel(&sim, filename_to_load);
+    }
+
     if (sim.droploadrequest.load()) {
       sim.LoadMessage(sim.dropfilename);
       mjModel* mnew = LoadModel(sim.dropfilename, sim);
       sim.droploadrequest.store(false);
 
       mjData* dnew = nullptr;
-      if (mnew) dnew = mj_makeData(mnew);
+      if (mnew)
+        dnew = mj_makeData(mnew);
       if (dnew) {
         sim.Load(mnew, dnew, sim.dropfilename);
 
@@ -321,7 +370,8 @@ void PhysicsLoop(mj::Simulate& sim) {
       sim.LoadMessage(sim.filename);
       mjModel* mnew = LoadModel(sim.filename, sim);
       mjData* dnew = nullptr;
-      if (mnew) dnew = mj_makeData(mnew);
+      if (mnew)
+        dnew = mj_makeData(mnew);
       if (dnew) {
         sim.Load(mnew, dnew, sim.filename);
 
@@ -370,7 +420,7 @@ void PhysicsLoop(mj::Simulate& sim) {
 
           // misalignment condition: distance from target sim time is bigger than syncMisalign
           bool misaligned =
-              std::abs(Seconds(elapsedCPU).count()/slowdown - elapsedSim) > syncMisalign;
+              std::abs(Seconds(elapsedCPU).count() / slowdown - elapsedSim) > syncMisalign;
 
           // out-of-sync (for any reason): reset sync times, step
           if (elapsedSim < 0 || elapsedCPU.count() < 0 || syncCPU.time_since_epoch().count() == 0 ||
@@ -399,10 +449,10 @@ void PhysicsLoop(mj::Simulate& sim) {
             bool measured = false;
             mjtNum prevSim = d->time;
 
-            double refreshTime = simRefreshFraction/sim.refresh_rate;
+            double refreshTime = simRefreshFraction / sim.refresh_rate;
 
             // step while sim lags behind cpu and within refreshTime
-            while (Seconds((d->time - syncSim)*slowdown) < mj::Simulate::Clock::now() - syncCPU &&
+            while (Seconds((d->time - syncSim) * slowdown) < mj::Simulate::Clock::now() - syncCPU &&
                    mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime)) {
               // measure slowdown before first step
               if (!measured && elapsedSim) {
@@ -450,7 +500,66 @@ void PhysicsLoop(mj::Simulate& sim) {
     }  // release std::lock_guard<std::mutex>
   }
 }
+
 }  // namespace
+
+#ifndef SIMULATE_AS_LIBRARY
+//-------------------------------------- ZeroMQ thread ---------------------------------------------
+
+void ZmqThread() {
+  void* context = zmq_ctx_new();
+  void* socket = zmq_socket(context, ZMQ_SUB);
+  int rc = zmq_bind(socket, "tcp://*:5555");
+  if (rc != 0) {
+    std::cerr << "Failed to bind ZeroMQ socket: " << zmq_strerror(errno) << std::endl;
+    return;
+  }
+
+  rc = zmq_setsockopt(socket, ZMQ_SUBSCRIBE, "MODEL", 5);
+  if (rc != 0) {
+    std::cerr << "Failed to set ZeroMQ subscription: " << zmq_strerror(errno) << std::endl;
+    return;
+  }
+
+  std::cout << "ZeroMQ subscriber listening on tcp://*:5555 for MODEL topic" << std::endl;
+
+  while (true) {
+    zmq_msg_t topic;
+    zmq_msg_t message;
+
+    zmq_msg_init(&topic);
+    zmq_msg_init(&message);
+
+    int size = zmq_msg_recv(&topic, socket, 0);
+    if (size == -1) {
+      std::cerr << "ZeroMQ recv error: " << zmq_strerror(errno) << std::endl;
+      break;
+    }
+
+    size = zmq_msg_recv(&message, socket, 0);
+    if (size == -1) {
+      std::cerr << "ZeroMQ recv error: " << zmq_strerror(errno) << std::endl;
+      break;
+    }
+
+    std::string topic_str(static_cast<char*>(zmq_msg_data(&topic)), zmq_msg_size(&topic));
+    std::string model_path(static_cast<char*>(zmq_msg_data(&message)), zmq_msg_size(&message));
+
+    if (topic_str == "MODEL") {
+      std::lock_guard<std::mutex> lock(model_mutex);
+      new_model_filename = model_path;
+      model_changed = true;
+      std::cout << "Received new model path via ZeroMQ: " << model_path << std::endl;
+    }
+
+    zmq_msg_close(&topic);
+    zmq_msg_close(&message);
+  }
+
+  zmq_close(socket);
+  zmq_ctx_destroy(context);
+}
+#endif
 
 //-------------------------------------- physics_thread --------------------------------------------
 
@@ -472,6 +581,8 @@ void PhysicsThread(mj::Simulate* sim, const char* filename) {
       const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
 
       mj_forward(m, d);
+
+      current_model_filename = filename;
 
     } else {
       sim->LoadMessageClear();
@@ -496,9 +607,44 @@ __attribute__((used, visibility("default"))) extern "C" void _mj_rosettaError(co
 }
 #endif
 
+#if defined(SIMULATE_AS_LIBRARY)
+// run simulation loop for library use
+// 传入所使用的模型路径
+int run_simulate(const char* filename) {
+  // scan for libraries in the plugin directory to load additional plugins
+  scanPluginLibraries();
+
+#if defined(mjUSEUSD)
+  // If USD is used, print the version.
+  std::printf("OpenUSD version v%d.%02d\n", PXR_MINOR_VERSION, PXR_PATCH_VERSION);
+#endif
+
+  mjvCamera cam;
+  mjv_defaultCamera(&cam);
+
+  mjvOption opt;
+  mjv_defaultOption(&opt);
+
+  mjvPerturb pert;
+  mjv_defaultPerturb(&pert);
+
+  // simulate object encapsulates the UI
+  auto sim = std::make_unique<mj::Simulate>(std::make_unique<mj::GlfwAdapter>(), &cam, &opt, &pert,
+                                            /* is_passive = */ false);
+
+  // start physics thread
+  std::thread physicsthreadhandle(&PhysicsThread, sim.get(), filename);
+
+  // start simulation UI loop (blocking call)
+  sim->RenderLoop();
+  physicsthreadhandle.join();
+
+  return 0;
+}
+
+#else
 // run event loop
 int main(int argc, char** argv) {
-
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)
   if (rosetta_error_msg) {
@@ -509,7 +655,7 @@ int main(int argc, char** argv) {
 
   // print version, check compatibility
   std::printf("MuJoCo version %s\n", mj_versionString());
-  if (mjVERSION_HEADER!=mj_version()) {
+  if (mjVERSION_HEADER != mj_version()) {
     mju_error("Headers and library have different versions");
   }
 
@@ -531,15 +677,16 @@ int main(int argc, char** argv) {
   mjv_defaultPerturb(&pert);
 
   // simulate object encapsulates the UI
-  auto sim = std::make_unique<mj::Simulate>(
-      std::make_unique<mj::GlfwAdapter>(),
-      &cam, &opt, &pert, /* is_passive = */ false
-  );
+  auto sim = std::make_unique<mj::Simulate>(std::make_unique<mj::GlfwAdapter>(), &cam, &opt, &pert,
+                                            /* is_passive = */ false);
 
   const char* filename = nullptr;
-  if (argc >  1) {
+  if (argc > 1) {
     filename = argv[1];
   }
+
+  // start ZeroMQ thread
+  std::thread zmqthreadhandle(&ZmqThread);
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), filename);
@@ -547,6 +694,8 @@ int main(int argc, char** argv) {
   // start simulation UI loop (blocking call)
   sim->RenderLoop();
   physicsthreadhandle.join();
+  zmqthreadhandle.join();
 
   return 0;
 }
+#endif

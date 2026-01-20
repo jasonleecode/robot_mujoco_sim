@@ -7,7 +7,7 @@ set(CMAKE_OSX_ARCHITECTURES arm64)
 set(ENABLE_ROS OFF CACHE BOOL "Disable ROS for standalone build" FORCE)
 
 option(BUILD_MUJOCO_SAMPLES "Build MuJoCo sample console apps in /sample" OFF)
-option(BUILD_MUJOCO_SIMULATE "Build the MuJoCo simulate UI in /simulate" OFF)
+option(BUILD_MUJOCO_SIMULATE "Build the mujoco_simulate executable (library is always built)" OFF)
 
 # === 关键修复 1: 强制指定 Homebrew 路径 (Mac M1/M2/M3 必备) ===
 # 这会让 find_package 优先去这里找 glfw3, CycloneDDS 和 OpenCV
@@ -43,8 +43,21 @@ find_package(OpenCV REQUIRED)
 # 但最好的做法是放在下面的 target_include_directories 中。
 # include_directories(${OpenCV_INCLUDE_DIRS}) 
 
+# 查找 ZeroMQ (用于 simulate 模块)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZMQ REQUIRED libzmq)
+
+# 手动查找 ZeroMQ 库文件
+find_library(ZMQ_LIBRARY zmq HINTS ${ZMQ_LIBRARY_DIRS})
+
 # === 添加planner子模块 ===
 add_subdirectory(planner)
+
+# === 添加simulate子模块 ===
+add_subdirectory(simulate)
+
+# === 添加plugins子模块 ===
+add_subdirectory(plugins)
 
 # === 添加可执行文件 ===
 add_executable(RobotSim
@@ -61,34 +74,30 @@ target_include_directories(RobotSim PRIVATE
     ${CycloneDDS_INCLUDE_DIRS}              # CycloneDDS Headers
     "${CMAKE_CURRENT_SOURCE_DIR}/src/dds_generated"
     ${OpenCV_INCLUDE_DIRS}                  # [修改点 2] 将 OpenCV 头文件路径加入目标
+    "${CMAKE_CURRENT_SOURCE_DIR}/simulate"  # Simulate Headers
+    ${ZMQ_INCLUDE_DIRS}                     # ZeroMQ Headers
 )
 
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -framework Foundation -framework AppKit -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo -framework Metal -framework QuartzCore -framework Accelerate -L/opt/homebrew/lib -lzmq")
+
 set(MUJOCO_PLATFORM_LIBS
-    "${MUJOCO_FRAMEWORK}"   # 直接链接 Framework 文件夹
-    glfw                    # 链接 GLFW (Homebrew 版)
-    "-framework Accelerate"
-    "-framework Metal"
-    "-framework QuartzCore"
-    "-framework Cocoa"      # GLFW 通常也需要 Cocoa
-    "-framework IOKit"
-    "-framework CoreVideo"
+    ${MUJOCO_FRAMEWORK}
+    /opt/homebrew/lib/libglfw.3.4.dylib
+    -lobjc
 )
 
 # === 链接库 ===
 target_link_libraries(RobotSim PRIVATE 
     ${MUJOCO_PLATFORM_LIBS} 
-    OpenGL::GL
     CycloneDDS::ddsc
     ${OpenCV_LIBS} 
     planner            # Planner模块
+    mujoco_simulate_lib # Simulate模块
+    ${ZMQ_LIBRARY}     # ZeroMQ 库
 )
 
 if(BUILD_MUJOCO_SAMPLES)
     add_subdirectory(sample)
-endif()
-
-if(BUILD_MUJOCO_SIMULATE)
-    add_subdirectory(simulate)
 endif()
 
 add_subdirectory(tools)
