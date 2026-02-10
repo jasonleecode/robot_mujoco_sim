@@ -38,10 +38,12 @@ find_package(glfw3 REQUIRED)
 find_package(CycloneDDS REQUIRED)
 
 # [修改点 1] 查找 OpenCV
-find_package(OpenCV REQUIRED)
-# 这一行其实在 find_package 后不是必须的，但在某些旧版 CMake 中有帮助，保留也可以，
-# 但最好的做法是放在下面的 target_include_directories 中。
-# include_directories(${OpenCV_INCLUDE_DIRS}) 
+find_package(OpenCV REQUIRED PATHS /opt/homebrew/opt/opencv NO_DEFAULT_PATH)
+if(NOT OpenCV_FOUND)
+  find_package(OpenCV REQUIRED)
+endif()
+message(STATUS "OpenCV found: ${OpenCV_VERSION}")
+message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}") 
 
 # 查找 ZeroMQ (用于 simulate 模块)
 find_package(PkgConfig REQUIRED)
@@ -57,7 +59,8 @@ add_subdirectory(planner)
 add_subdirectory(simulate)
 
 # === 添加plugins子模块 ===
-add_subdirectory(plugins)
+# 暂时禁用plugin编译（需要更新到MuJoCo 3.x的新plugin API）
+# add_subdirectory(plugins)
 
 # === 添加可执行文件 ===
 add_executable(RobotSim

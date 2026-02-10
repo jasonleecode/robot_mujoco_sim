@@ -46,6 +46,13 @@ class RobotSim {
 
   int check_gravity = 1;
 
+  // 运动控制按钮状态（用于UI按钮）
+  int motion_forward = 0;   // 前进按钮
+  int motion_stop = 0;      // 停止按钮
+
+  // 运动控制回调（由main.cpp设置）
+  std::function<void(int)> motion_callback;  // 参数：0=stop, 1=forward
+
   // 图表数据
   mjvFigure fig;
   mjrRect fig_rect = {0, 0, 0, 0};

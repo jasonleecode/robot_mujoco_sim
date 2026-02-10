@@ -173,6 +173,20 @@ int main(int argc, char** argv) {
     SharedControlData shared_data;
     shared_data.raw_values.assign(num_actuators, 0.0);
 
+    // 设置运动控制回调
+    robot.motion_callback = [&shared_data](int motion_type) {
+      std::lock_guard<std::mutex> lock(shared_data.mutex);
+      if (motion_type == 0) {
+        // 停止
+        shared_data.current_motion = control::BasicMotion::kStand;
+        std::cout << "Motion: Stop (Stand)" << std::endl;
+      } else if (motion_type == 1) {
+        // 前进
+        shared_data.current_motion = control::BasicMotion::kForward;
+        std::cout << "Motion: Forward" << std::endl;
+      }
+    };
+
     // 注意：SpotPlanner 现在完全属于物理线程，不需要锁
     SpotPlanner planner;
     planner.setControlFrequency(kSimulationDt);

@@ -1,3 +1,6 @@
 [submodule "models/DrEureka"]
 	path = models/DrEureka
 	url = https://github.com/jasonleecode/DrEureka_Mac_Metal.git
+[submodule "models/walk"]
+	path = models/walk
+	url = https://github.com/jasonleecode/walk-these-ways.git

@@ -1,4 +1,5 @@
 #include "RobotSim.hpp"
+#include "SimulateUI.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -100,148 +101,58 @@ RobotSim::~RobotSim() {
 }
 
 void RobotSim::uiModify(mjUI* ui, mjuiState* state, mjrContext* con) {
-  mjui_resize(ui, con);
-
-  // 检查并分配 Aux Buffer
-  // 如果没有这一步，UI 可能无法显示或无法响应鼠标
-  int id = ui->auxid;
-  if (con->auxFBO[id] == 0 || con->auxWidth[id] != ui->width ||
-      con->auxHeight[id] != ui->maxheight) {
-    // 分配辅助缓冲区：ID, 宽度, 高度, 采样数
-    mjr_addAux(id, ui->width, ui->maxheight, ui->spacing.samples, con);
-  }
-
-  mjui_update(-1, -1, ui, state, con);
+  // 使用simulate库的标准UI修改函数
+  SimulateUI::UiModify(ui, state, con);
 }
 
 // ---------------- UI 初始化 ----------------
 void RobotSim::initializeUI() {
   // 清空结构体
-  std::memset(&ui0, 0, sizeof(ui0));
-  std::memset(&ui1, 0, sizeof(ui1));
   std::memset(&uistate, 0, sizeof(uistate));
 
-  // 使用官方配色方案
-  mjui_themeSpacing(0);
-  mjui_themeColor(0);
-
-  ui0.spacing = mjui_themeSpacing(0);
-  ui0.color = mjui_themeColor(0);
-  ui0.predicate = NULL;
-  ui0.rectid = 1;  // UI0 对应 rect[1]
-  ui0.auxid = 0;   // 辅助缓冲 ID
-
-  ui1.spacing = mjui_themeSpacing(0);
-  ui1.color = mjui_themeColor(0);
-  ui1.predicate = NULL;
-  ui1.rectid = 2;  // UI1 对应 rect[2]
-  ui1.auxid = 1;
+  // 使用simulate库的标准主题初始化
+  SimulateUI::InitializeTheme(&ui0, 1, 0);  // UI0: rectid=1, auxid=0
+  SimulateUI::InitializeTheme(&ui1, 2, 1);  // UI1: rectid=2, auxid=1
 
   // ================= 左侧面板 (UI0) =================
+  // 使用simulate库的标准UI定义
 
-  // Section 1: Simulation
-  static mjuiDef defSimulation[] = {{mjITEM_SECTION, "Simulation", 2, nullptr, "AS"},
-                                    {mjITEM_RADIO, "", 2, &run, "Pause\nRun"},
-                                    {mjITEM_BUTTON, "Reset", 2, nullptr, " #259"},
-                                    {mjITEM_SEPARATOR, "Speed", 1},
-                                    {mjITEM_SLIDERNUM, "Scale", 2, &time_scale, "0.1 2.0"},
-                                    {mjITEM_END}};
-  mjui_add(&ui0, defSimulation);
+  // Section 1: Simulation - 使用标准定义（带运动控制按钮）
+  mjui_add(&ui0, SimulateUI::SimulationSection::GetDefinition(&run, &time_scale, &motion_forward, &motion_stop));
 
-  // Section 2: Physics
-  static mjuiDef defPhysics[] = {{mjITEM_SECTION, "Physics", 1, nullptr, "AP"},
-                                 {mjITEM_CHECKINT, "Gravity", 2, &check_gravity, ""},
-                                 {mjITEM_END}};
-  mjui_add(&ui0, defPhysics);
+  // Section 2: Physics - 使用标准定义
+  mjui_add(&ui0, SimulateUI::PhysicsSection::GetDefinition(&check_gravity));
 
-  // Section 3: Rendering (简单示例)
-  static mjuiDef defRender[] = {{mjITEM_SECTION, "Rendering", 1, nullptr, "AR"},
-                                {mjITEM_CHECKINT, "Wireframe", 2, &opt.frame, ""},  // 仅作示例
-                                {mjITEM_END}};
-  mjui_add(&ui0, defRender);
+  // Section 3: Rendering - 使用标准定义（增强版）
+  mjui_add(&ui0, SimulateUI::RenderingSection::GetDefinition(&opt));
 
-  // Section 4: Gait Analysis
-  // 我们用 7 个空白的静态文本项来撑开高度
-  // 这里的 " " 是内容，高度由字体决定
-  static mjuiDef defAnalysis[] = {{mjITEM_SECTION, "Gait Analysis", 1, nullptr, "AG"},
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 1
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 2
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 3
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 4
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 5
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 6
-                                  {mjITEM_STATIC, ".", 2, nullptr, ""},  // 占位符 7
-                                  {mjITEM_END}};
+  // Section 4: Visualization - 使用标准定义
+  mjui_add(&ui0, SimulateUI::VisualizationSection::GetDefinition(&opt));
 
-  mjui_add(&ui0, defAnalysis);
+  // Section 5: Gait Analysis - 自定义图表区域
+  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 7);
 
-  ui0.sect[0].state = 1;  // Simulation
-  ui0.sect[1].state = 1;  // Physics
-  ui0.sect[2].state = 1;  // Rendering
-  ui0.sect[3].state = 1;  // Gait Analysis (默认展开)
+  // 默认展开所有section
+  for (int i = 0; i < ui0.nsect; i++) {
+    ui0.sect[i].state = 1;
+  }
 
   // ================= 右侧面板 (UI1) =================
 
-  // Section: Joints (自动生成所有关节滑块)
+  // Section 1: Joint Control - 使用工具函数添加滑块
   static mjuiDef defJoints[] = {{mjITEM_SECTION, "Joint Control", 2, nullptr, "AJ"}, {mjITEM_END}};
   mjui_add(&ui1, defJoints);
+  SimulateUI::AddJointSliders(&ui1, m, d);
 
-  // 动态添加滑块定义
-  static mjuiDef defSlider[] = {{mjITEM_SLIDERNUM, "", 2, nullptr, "-1 1"}, {mjITEM_END}};
+  // Section 2: Camera View - 相机预览区域
+  SimulateUI::AddPlaceholders(&ui1, "Camera View", 17);
 
-  if (m) {
-    // 为每个执行器(电机)添加滑块
-    for (int i = 0; i < m->nu && i < mjMAXUIITEM; i++) {
-      // 绑定数据到 d->ctrl
-      defSlider[0].pdata = &d->ctrl[i];
-
-      // 获取名字
-      const char* name = mj_id2name(m, mjOBJ_ACTUATOR, i);
-      if (name) {
-        std::strncpy(defSlider[0].name, name, mjMAXUINAME - 1);
-      } else {
-        std::snprintf(defSlider[0].name, mjMAXUINAME, "Motor %d", i);
-      }
-
-      // 设置范围
-      if (m->actuator_ctrllimited[i]) {
-        std::snprintf(defSlider[0].other, mjMAXUITEXT, "%.4g %.4g", m->actuator_ctrlrange[2 * i],
-                      m->actuator_ctrlrange[2 * i + 1]);
-      } else {
-        std::strcpy(defSlider[0].other, "-20 20");  // 默认力矩范围
-      }
-
-      mjui_add(&ui1, defSlider);
-    }
+  // 默认展开所有section
+  for (int i = 0; i < ui1.nsect; i++) {
+    ui1.sect[i].state = 1;
   }
 
-  // Section 2: Camera View
-  // 我们添加一组空白占位符来撑开高度
-  // 假设每个 Item 高度约 20px，10个大约能撑开 200px 的高度
-  static mjuiDef defCamera[] = {{mjITEM_SECTION, "Camera View", 1, nullptr, "AC"},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},
-                                {mjITEM_STATIC, ".", 2, nullptr, ""},  // 约 180-200px 高
-                                {mjITEM_END}};
-  mjui_add(&ui1, defCamera);
-
-  ui1.sect[0].state = 1;  // Joint Control
-  ui1.sect[1].state = 1;  // Camera View
-
+  // 应用UI修改
   uiModify(&ui0, &uistate, &con);
   uiModify(&ui1, &uistate, &con);
 }
@@ -360,38 +271,43 @@ void RobotSim::renderFrame() {
     mjui_render(&ui0, &uistate, &con);
     glDisable(GL_SCISSOR_TEST);  // 禁用裁剪
 
-    int sect_id = 3;
-    if (sect_id < ui0.nsect && ui0.sect[sect_id].state) {
+    // Section 4: Gait Analysis (UI重构后从3变为4)
+    int sect_id = 4;
+    if (sect_id < ui0.nsect && ui0.sect[sect_id].state == 1) {  // 只在展开时绘制
       int start = 1;
       int end = ui0.sect[sect_id].nitem - 1;
-      if (end > start) {
+      if (end > start && ui0.sect[sect_id].nitem > 1) {  // 确保有足够的items
         mjrRect rs = ui0.sect[sect_id].item[start].rect;
         mjrRect re = ui0.sect[sect_id].item[end].rect;
 
-        mjrRect graph_rect;
-        graph_rect.left = rs.left + 5;
-        graph_rect.width = rs.width - 10;
+        // 检查rect是否有效
+        if (rs.width > 0 && rs.height > 0) {
+          mjrRect graph_rect;
+          // X轴：UI0在左侧，rect已经是绝对坐标
+          graph_rect.left = rect_ui0.left + rs.left + 5;
+          graph_rect.width = rs.width - 10;
 
-        // [修复坐标] 计算原始高度和底部
-        // 注意：MuJoCo UI 的 rect 数据在这里似乎是“反”的或者相对于 Top 的
-        // 我们通过计算两个 item 之间的跨度来确定高度
-        int raw_height = (rs.bottom + rs.height) - re.bottom;
-        int raw_bottom = re.bottom;
+          // Y轴：计算高度和底部位置
+          int raw_height = (rs.bottom + rs.height) - re.bottom;
+          int raw_bottom = re.bottom;
 
-        // [关键修复] 执行 Y 轴翻转： WindowHeight - Bottom - Height
-        graph_rect.height = raw_height;
-        graph_rect.bottom = viewport.height - raw_bottom - raw_height;
+          graph_rect.height = raw_height - 10;
+          graph_rect.bottom = viewport.height - raw_bottom - raw_height + 5;
 
-        // 设置背景为黑色 (alpha=1 不透明)
-        fig.figurergba[0] = 0.0f;
-        fig.figurergba[1] = 0.0f;
-        fig.figurergba[2] = 0.0f;
-        fig.figurergba[3] = 1.0f;
-        fig.flg_extend = 1;
-        fig.flg_barplot = 0;
+          // 只在有效尺寸时绘制
+          if (graph_rect.width > 0 && graph_rect.height > 0) {
+            // 设置背景为黑色 (alpha=1 不透明)
+            fig.figurergba[0] = 0.0f;
+            fig.figurergba[1] = 0.0f;
+            fig.figurergba[2] = 0.0f;
+            fig.figurergba[3] = 1.0f;
+            fig.flg_extend = 1;
+            fig.flg_barplot = 0;
 
-        // 绘制图表
-        mjr_figure(graph_rect, &fig, &con);
+            // 绘制图表
+            mjr_figure(graph_rect, &fig, &con);
+          }
+        }
       }
     }
   }
@@ -401,49 +317,73 @@ void RobotSim::renderFrame() {
     mjui_render(&ui1, &uistate, &con);
     glDisable(GL_SCISSOR_TEST);
 
+    // Section 1: Camera View
     int sect_id = 1;
-    if (sect_id < ui1.nsect && ui1.sect[sect_id].state) {
+    if (sect_id < ui1.nsect && ui1.sect[sect_id].state == 1) {  // 只在展开时绘制
       int start = 1;
       int end = ui1.sect[sect_id].nitem - 1;
-      if (end > start) {
+      if (end > start && ui1.sect[sect_id].nitem > 1) {  // 确保有足够的items
         mjrRect rs = ui1.sect[sect_id].item[start].rect;
         mjrRect re = ui1.sect[sect_id].item[end].rect;
 
-        mjrRect img_rect;
-        // X轴：加上右侧面板的偏移量
-        img_rect.left = rect_ui1.left + rs.left + 5;
-        img_rect.width = rs.width - 10;
+        // 检查rect是否有效
+        if (rs.width > 0 && rs.height > 0) {
+          mjrRect img_rect;
+          // X轴：UI1在右侧，需要加上rect_ui1.left偏移
+          img_rect.left = rect_ui1.left + rs.left + 5;
+          img_rect.width = rs.width - 10;
 
-        // [修复坐标] Y 轴翻转
-        int raw_height = (rs.bottom + rs.height) - re.bottom;
-        int raw_bottom = re.bottom;
+          // Y轴：计算高度和底部位置
+          int raw_height = (rs.bottom + rs.height) - re.bottom;
+          int raw_bottom = re.bottom;
 
-        img_rect.height = raw_height - 10;  // 稍微留点空隙
-        img_rect.bottom = viewport.height - raw_bottom - raw_height + 5;
+          img_rect.height = raw_height - 10;
+          img_rect.bottom = viewport.height - raw_bottom - raw_height + 5;
 
-        if (img_rect.width > 0 && img_rect.height > 0) {
-          if (!cam_rgb_vec.empty()) {
-            // OpenCV 处理
-            cv::Mat src_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
-            cv::Mat src_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
-            cv::Mat rgb_u, depth_u;
-            cv::flip(src_rgb, rgb_u, 0);
-            cv::flip(src_depth, depth_u, 0);
-            cv::Mat depth_n, depth_c;
-            depth_u.convertTo(depth_n, CV_8U, 255.0 / 5.0);
-            cv::applyColorMap(depth_n, depth_c, cv::COLORMAP_JET);
-            cv::Mat combo;
-            cv::cvtColor(rgb_u, rgb_u, cv::COLOR_RGB2BGR);
-            cv::hconcat(std::vector<cv::Mat>{depth_c, rgb_u}, combo);
-            cv::Mat final_img;
-            cv::resize(combo, final_img, cv::Size(img_rect.width, img_rect.height));
-            cv::cvtColor(final_img, final_img, cv::COLOR_BGR2RGB);
-            cv::flip(final_img, final_img, 0);
+          if (img_rect.width > 0 && img_rect.height > 0) {
+            if (!cam_rgb_vec.empty() && !cam_depth_vec.empty()) {
+              // OpenCV 处理
+              cv::Mat src_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
+              cv::Mat src_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
 
-            mjr_drawPixels(final_img.data, nullptr, img_rect, &con);
-          } else {
-            // 无数据：显示暗红色占位符
-            mjr_rectangle(img_rect, 0.3f, 0.0f, 0.0f, 1.0f);
+              // 翻转图像（MuJoCo读取是底部优先）
+              cv::Mat rgb_u, depth_u;
+              cv::flip(src_rgb, rgb_u, 0);
+              cv::flip(src_depth, depth_u, 0);
+
+              // 深度图归一化和伪彩色
+              cv::Mat depth_n, depth_c;
+              double min_depth, max_depth;
+              cv::minMaxLoc(depth_u, &min_depth, &max_depth);
+
+              // 如果深度数据有效，进行归一化
+              if (max_depth > 0.001) {
+                depth_u.convertTo(depth_n, CV_8U, 255.0 / max_depth);
+                cv::applyColorMap(depth_n, depth_c, cv::COLORMAP_JET);
+              } else {
+                // 深度数据无效，显示黑色
+                depth_c = cv::Mat::zeros(cam_h, cam_w, CV_8UC3);
+              }
+
+              // RGB转BGR（OpenCV格式）
+              cv::Mat rgb_bgr;
+              cv::cvtColor(rgb_u, rgb_bgr, cv::COLOR_RGB2BGR);
+
+              // 水平拼接：左边深度图，右边RGB图
+              cv::Mat combo;
+              cv::hconcat(std::vector<cv::Mat>{depth_c, rgb_bgr}, combo);
+
+              // 调整大小并转回RGB
+              cv::Mat final_img;
+              cv::resize(combo, final_img, cv::Size(img_rect.width, img_rect.height));
+              cv::cvtColor(final_img, final_img, cv::COLOR_BGR2RGB);
+              cv::flip(final_img, final_img, 0);
+
+              mjr_drawPixels(final_img.data, nullptr, img_rect, &con);
+            } else {
+              // 无数据：显示暗红色占位符
+              mjr_rectangle(img_rect, 0.3f, 0.0f, 0.0f, 1.0f);
+            }
           }
         }
       }
@@ -504,13 +444,23 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
   if (ui0_enable) {
     mjuiItem* it = mjui_event(&ui0, &uistate, &con);
     if (it) {
-      // 处理特殊按钮事件 (如 Reset)
+      // 处理特殊按钮事件
       if (strcmp(it->name, "Reset") == 0) {
         std::lock_guard<std::mutex> lock(sim_mutex);
         mj_resetData(m, d);
         mj_forward(m, d);
         // 重置时间
         plot_idx = 0;
+      } else if (strcmp(it->name, "Forward") == 0) {
+        // 前进按钮
+        if (motion_callback) {
+          motion_callback(1);  // 1 = forward
+        }
+      } else if (strcmp(it->name, "Stop") == 0) {
+        // 停止按钮
+        if (motion_callback) {
+          motion_callback(0);  // 0 = stop
+        }
       }
       return;  // UI 处理了事件，不传给 3D
     }
@@ -556,6 +506,10 @@ void RobotSim::handle_mouse_move(double xpos, double ypos) {
 
   // 如果鼠标在 UI 上，不处理 3D 移动
   if (uistate.mouserect == 1 || uistate.mouserect == 2)
+    return;
+
+  // 检查鼠标是否在scene区域内（rect[0]）
+  if (uistate.mouserect != 0)
     return;
 
   // 3D 相机移动

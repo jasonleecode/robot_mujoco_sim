@@ -3,8 +3,6 @@
 #include <cstring>
 #include <string>
 
-namespace {
-
 // ================= Plugin Data =================
 struct ConstantForcePlugin {
   int body_id;
@@ -12,7 +10,7 @@ struct ConstantForcePlugin {
 };
 
 // ================= init =================
-void* init(const mjModel* m, const char* config) {
+static void* plugin_init(const mjModel* m, const char* config) {
   auto* plugin = new ConstantForcePlugin();
 
   // 默认参数
@@ -25,7 +23,7 @@ void* init(const mjModel* m, const char* config) {
 }
 
 // ================= compute =================
-void compute(const mjModel* m, mjData* d, void* userdata) {
+static void plugin_compute(const mjModel* m, mjData* d, void* userdata) {
   auto* plugin = static_cast<ConstantForcePlugin*>(userdata);
   if (plugin->body_id < 0)
     return;
@@ -39,11 +37,9 @@ void compute(const mjModel* m, mjData* d, void* userdata) {
 }
 
 // ================= destroy =================
-void destroy(void* userdata) {
+static void plugin_destroy(void* userdata) {
   delete static_cast<ConstantForcePlugin*>(userdata);
 }
 
-}  // namespace
-
 // ================= register =================
-mjPLUGIN_DEFINE(constant_force_plugin, init, destroy, compute, nullptr, nullptr)
+mjPLUGIN_DEFINE(constant_force_plugin, plugin_init, plugin_destroy, plugin_compute, nullptr, nullptr)
