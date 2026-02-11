@@ -23,7 +23,6 @@ enum LeftSections {
 // Section IDs for right panel (UI1)
 enum RightSections {
   SECT_JOINT = 0,
-  SECT_CONTROL,
   SECT_CAMERA_VIEW,
   NSECT1
 };
@@ -31,7 +30,7 @@ enum RightSections {
 // 标准UI定义 - Simulation Section
 // 这些定义复用了simulate库的标准布局
 struct SimulationSection {
-  static mjuiDef* GetDefinition(int* run, double* time_scale, int* motion_forward, int* motion_stop) {
+  static mjuiDef* GetDefinition(int* run, double* time_scale) {
     static mjuiDef def[] = {
       {mjITEM_SECTION, "Simulation", 2, nullptr, "AS"},
       {mjITEM_RADIO, "", 2, run, "Pause\nRun"},
@@ -39,8 +38,8 @@ struct SimulationSection {
       {mjITEM_SEPARATOR, "Speed", 1},
       {mjITEM_SLIDERNUM, "Scale", 2, time_scale, "0.1 2.0"},
       {mjITEM_SEPARATOR, "Motion", 1},
-      {mjITEM_BUTTON, "Forward", 2, motion_forward, ""},
-      {mjITEM_BUTTON, "Stop", 2, motion_stop, ""},
+      {mjITEM_BUTTON, "Forward", 2, nullptr, ""},
+      {mjITEM_BUTTON, "Stop", 2, nullptr, ""},
       {mjITEM_END}
     };
     return def;

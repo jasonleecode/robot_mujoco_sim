@@ -63,6 +63,15 @@ class RobotSim {
   // 截图请求
   std::atomic<int> screenshotrequest{0};
 
+  // UI 脏标记：只在需要时才调用 uiModify
+  bool ui_dirty = true;
+  int prev_viewport_w = 0;
+  int prev_viewport_h = 0;
+
+  // 相机采集帧计数器（降低采集频率以减少锁竞争）
+  int cam_frame_counter = 0;
+  static constexpr int kCamCaptureInterval = 3;  // 每3帧采集一次
+
   // 构造与析构
   RobotSim(const std::string& xml_path);
   ~RobotSim();
@@ -119,9 +128,6 @@ class RobotSim {
   void getIMUDataInternal(IMUData& data, const std::string& sensor_name_prefix);
 
   void uiModify(mjUI* ui, mjuiState* state, mjrContext* con);
-
-  // UI 内部辅助
-  void updateUiLayout(const mjrRect& viewport);
 
   // 静态回调
   static void mouse_button(GLFWwindow* window, int button, int action, int mods);

@@ -118,7 +118,7 @@ void RobotSim::initializeUI() {
   // 使用simulate库的标准UI定义
 
   // Section 1: Simulation - 使用标准定义（带运动控制按钮）
-  mjui_add(&ui0, SimulateUI::SimulationSection::GetDefinition(&run, &time_scale, &motion_forward, &motion_stop));
+  mjui_add(&ui0, SimulateUI::SimulationSection::GetDefinition(&run, &time_scale));
 
   // Section 2: Physics - 使用标准定义
   mjui_add(&ui0, SimulateUI::PhysicsSection::GetDefinition(&check_gravity));
@@ -129,8 +129,8 @@ void RobotSim::initializeUI() {
   // Section 4: Visualization - 使用标准定义
   mjui_add(&ui0, SimulateUI::VisualizationSection::GetDefinition(&opt));
 
-  // Section 5: Gait Analysis - 自定义图表区域
-  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 7);
+  // Section 5: Gait Analysis - 自定义图表区域（每个占位符约6px高度）
+  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 35);
 
   // 默认展开所有section
   for (int i = 0; i < ui0.nsect; i++) {
@@ -144,8 +144,8 @@ void RobotSim::initializeUI() {
   mjui_add(&ui1, defJoints);
   SimulateUI::AddJointSliders(&ui1, m, d);
 
-  // Section 2: Camera View - 相机预览区域
-  SimulateUI::AddPlaceholders(&ui1, "Camera View", 17);
+  // Section 2: Camera View - 相机预览区域（每个占位符约6px高度）
+  SimulateUI::AddPlaceholders(&ui1, "Camera View", 45);
 
   // 默认展开所有section
   for (int i = 0; i < ui1.nsect; i++) {
@@ -227,17 +227,25 @@ void RobotSim::renderFrame() {
   // 1. 物理同步与数据获取
   {
     std::lock_guard<std::mutex> lock(sim_mutex);
-    // 获取相机数据
-    getCameraImages("tof_cam", cam_w, cam_h, cam_rgb_vec, cam_depth_vec);
     mjv_updateScene(m, d, &opt, NULL, &cam, mjCAT_ALL, &scn);
+
+    // 降低相机采集频率，减少锁持有时间
+    if (++cam_frame_counter >= kCamCaptureInterval) {
+      cam_frame_counter = 0;
+      getCameraImages("tof_cam", cam_w, cam_h, cam_rgb_vec, cam_depth_vec);
+    }
   }
 
   // 2. 布局更新
   mjrRect viewport = {0, 0, 0, 0};
   glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
 
-  uiModify(&ui0, &uistate, &con);
-  uiModify(&ui1, &uistate, &con);
+  // 检测窗口大小变化
+  if (viewport.width != prev_viewport_w || viewport.height != prev_viewport_h) {
+    prev_viewport_w = viewport.width;
+    prev_viewport_h = viewport.height;
+    ui_dirty = true;
+  }
 
   mjrRect rect_ui0 = {0, 0, 0, 0};
   mjrRect rect_ui1 = {0, 0, 0, 0};
@@ -256,135 +264,154 @@ void RobotSim::renderFrame() {
     rect_scene.width -= ui1.width;
   }
 
-  uistate.nrect = 3;
-  uistate.rect[0] = rect_scene;
+  // rect[0] 必须是整个窗口大小（MuJoCo UI 系统依赖此作为参考）
+  uistate.nrect = 4;
+  uistate.rect[0] = viewport;
   uistate.rect[1] = rect_ui0;
   uistate.rect[2] = rect_ui1;
+  uistate.rect[3] = rect_scene;
+
+  // 布局重建只在需要时执行，mjui_update 每帧调用以刷新 aux buffer
+  if (ui_dirty) {
+    uiModify(&ui0, &uistate, &con);
+    uiModify(&ui1, &uistate, &con);
+    ui_dirty = false;
+  } else {
+    mjui_update(-1, -1, &ui0, &uistate, &con);
+    mjui_update(-1, -1, &ui1, &uistate, &con);
+  }
 
   // 3. 渲染场景
   mjr_render(rect_scene, &scn, &con);
 
   // 4. 渲染 UI 与嵌入内容
+  // 重置 OpenGL viewport 到全窗口（mjr_render 会把 viewport 设为 rect_scene 区域）
+  glViewport(0, 0, viewport.width, viewport.height);
+  glScissor(0, 0, viewport.width, viewport.height);
 
-  // --- UI0: Gait Analysis (左侧) ---
+  // --- UI0: Left panel with Gait Analysis graph ---
   if (ui0_enable) {
     mjui_render(&ui0, &uistate, &con);
-    glDisable(GL_SCISSOR_TEST);  // 禁用裁剪
+    // 重置 OpenGL 状态（mjui_render 可能改变 viewport）
+    glViewport(0, 0, viewport.width, viewport.height);
+    glScissor(0, 0, viewport.width, viewport.height);
 
-    // Section 4: Gait Analysis (UI重构后从3变为4)
-    int sect_id = 4;
-    if (sect_id < ui0.nsect && ui0.sect[sect_id].state == 1) {  // 只在展开时绘制
-      int start = 1;
-      int end = ui0.sect[sect_id].nitem - 1;
-      if (end > start && ui0.sect[sect_id].nitem > 1) {  // 确保有足够的items
-        mjrRect rs = ui0.sect[sect_id].item[start].rect;
-        mjrRect re = ui0.sect[sect_id].item[end].rect;
+    // 在 section 内容区域绘制 Gait Analysis 图表
+    int gait_sect = SimulateUI::SECT_GAIT_ANALYSIS;
+    if (gait_sect < ui0.nsect && ui0.sect[gait_sect].state == 1) {
+      mjrRect rc = ui0.sect[gait_sect].rcontent;
+      int aux_to_screen = viewport.height - ui0.maxheight + ui0.scroll;
+      int margin = 4;
 
-        // 检查rect是否有效
-        if (rs.width > 0 && rs.height > 0) {
-          mjrRect graph_rect;
-          // X轴：UI0在左侧，rect已经是绝对坐标
-          graph_rect.left = rect_ui0.left + rs.left + 5;
-          graph_rect.width = rs.width - 10;
+      mjrRect graph_rect;
+      graph_rect.left = rect_ui0.left + rc.left + margin;
+      graph_rect.width = rc.width - 2 * margin;
+      graph_rect.bottom = rc.bottom + aux_to_screen + margin;
+      graph_rect.height = rc.height - 2 * margin;
 
-          // Y轴：计算高度和底部位置
-          int raw_height = (rs.bottom + rs.height) - re.bottom;
-          int raw_bottom = re.bottom;
+      // 裁剪到面板可见区域
+      int panel_bottom = rect_ui0.bottom;
+      int panel_top = rect_ui0.bottom + rect_ui0.height;
+      if (graph_rect.bottom < panel_bottom) {
+        int clip = panel_bottom - graph_rect.bottom;
+        graph_rect.bottom = panel_bottom;
+        graph_rect.height -= clip;
+      }
+      if (graph_rect.bottom + graph_rect.height > panel_top) {
+        graph_rect.height = panel_top - graph_rect.bottom;
+      }
 
-          graph_rect.height = raw_height - 10;
-          graph_rect.bottom = viewport.height - raw_bottom - raw_height + 5;
-
-          // 只在有效尺寸时绘制
-          if (graph_rect.width > 0 && graph_rect.height > 0) {
-            // 设置背景为黑色 (alpha=1 不透明)
-            fig.figurergba[0] = 0.0f;
-            fig.figurergba[1] = 0.0f;
-            fig.figurergba[2] = 0.0f;
-            fig.figurergba[3] = 1.0f;
-            fig.flg_extend = 1;
-            fig.flg_barplot = 0;
-
-            // 绘制图表
-            mjr_figure(graph_rect, &fig, &con);
-          }
-        }
+      if (graph_rect.width > 0 && graph_rect.height > 20) {
+        fig.figurergba[0] = 0.0f;
+        fig.figurergba[1] = 0.0f;
+        fig.figurergba[2] = 0.0f;
+        fig.figurergba[3] = 1.0f;
+        fig.flg_extend = 1;
+        fig.flg_barplot = 0;
+        mjr_figure(graph_rect, &fig, &con);
       }
     }
   }
 
-  // --- UI1: Camera View (右侧) ---
+  // --- UI1: Right panel with Camera View ---
   if (ui1_enable) {
     mjui_render(&ui1, &uistate, &con);
-    glDisable(GL_SCISSOR_TEST);
+    // 重置 OpenGL 状态
+    glViewport(0, 0, viewport.width, viewport.height);
+    glScissor(0, 0, viewport.width, viewport.height);
 
-    // Section 1: Camera View
-    int sect_id = 1;
-    if (sect_id < ui1.nsect && ui1.sect[sect_id].state == 1) {  // 只在展开时绘制
-      int start = 1;
-      int end = ui1.sect[sect_id].nitem - 1;
-      if (end > start && ui1.sect[sect_id].nitem > 1) {  // 确保有足够的items
-        mjrRect rs = ui1.sect[sect_id].item[start].rect;
-        mjrRect re = ui1.sect[sect_id].item[end].rect;
+    // 在 section 内容区域绘制 Camera View
+    int cam_sect = SimulateUI::SECT_CAMERA_VIEW;
+    if (cam_sect < ui1.nsect && ui1.sect[cam_sect].state == 1) {
+      mjrRect rc = ui1.sect[cam_sect].rcontent;
+      int aux_to_screen = viewport.height - ui1.maxheight + ui1.scroll;
+      int margin = 4;
 
-        // 检查rect是否有效
-        if (rs.width > 0 && rs.height > 0) {
-          mjrRect img_rect;
-          // X轴：UI1在右侧，需要加上rect_ui1.left偏移
-          img_rect.left = rect_ui1.left + rs.left + 5;
-          img_rect.width = rs.width - 10;
+      mjrRect img_rect;
+      img_rect.left = rect_ui1.left + rc.left + margin;
+      img_rect.width = rc.width - 2 * margin;
+      img_rect.bottom = rc.bottom + aux_to_screen + margin;
+      img_rect.height = rc.height - 2 * margin;
 
-          // Y轴：计算高度和底部位置
-          int raw_height = (rs.bottom + rs.height) - re.bottom;
-          int raw_bottom = re.bottom;
+      // 裁剪到面板可见区域
+      int panel_bottom = rect_ui1.bottom;
+      int panel_top = rect_ui1.bottom + rect_ui1.height;
+      if (img_rect.bottom < panel_bottom) {
+        int clip = panel_bottom - img_rect.bottom;
+        img_rect.bottom = panel_bottom;
+        img_rect.height -= clip;
+      }
+      if (img_rect.bottom + img_rect.height > panel_top) {
+        img_rect.height = panel_top - img_rect.bottom;
+      }
 
-          img_rect.height = raw_height - 10;
-          img_rect.bottom = viewport.height - raw_bottom - raw_height + 5;
+      if (img_rect.width > 0 && img_rect.height > 20) {
+        if (!cam_rgb_vec.empty() && !cam_depth_vec.empty()) {
+          cv::Mat src_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
+          cv::Mat src_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
 
-          if (img_rect.width > 0 && img_rect.height > 0) {
-            if (!cam_rgb_vec.empty() && !cam_depth_vec.empty()) {
-              // OpenCV 处理
-              cv::Mat src_rgb(cam_h, cam_w, CV_8UC3, cam_rgb_vec.data());
-              cv::Mat src_depth(cam_h, cam_w, CV_32F, cam_depth_vec.data());
+          cv::Mat rgb_u, depth_u;
+          cv::flip(src_rgb, rgb_u, 0);
+          cv::flip(src_depth, depth_u, 0);
 
-              // 翻转图像（MuJoCo读取是底部优先）
-              cv::Mat rgb_u, depth_u;
-              cv::flip(src_rgb, rgb_u, 0);
-              cv::flip(src_depth, depth_u, 0);
+          // MuJoCo 深度缓冲区是非线性的 [0,1]，需要先转换为线性距离
+          float znear = m->vis.map.znear * m->stat.extent;
+          float zfar = m->vis.map.zfar * m->stat.extent;
+          float depth_ratio = 1.0f - znear / zfar;
 
-              // 深度图归一化和伪彩色
-              cv::Mat depth_n, depth_c;
-              double min_depth, max_depth;
-              cv::minMaxLoc(depth_u, &min_depth, &max_depth);
-
-              // 如果深度数据有效，进行归一化
-              if (max_depth > 0.001) {
-                depth_u.convertTo(depth_n, CV_8U, 255.0 / max_depth);
-                cv::applyColorMap(depth_n, depth_c, cv::COLORMAP_JET);
-              } else {
-                // 深度数据无效，显示黑色
-                depth_c = cv::Mat::zeros(cam_h, cam_w, CV_8UC3);
-              }
-
-              // RGB转BGR（OpenCV格式）
-              cv::Mat rgb_bgr;
-              cv::cvtColor(rgb_u, rgb_bgr, cv::COLOR_RGB2BGR);
-
-              // 水平拼接：左边深度图，右边RGB图
-              cv::Mat combo;
-              cv::hconcat(std::vector<cv::Mat>{depth_c, rgb_bgr}, combo);
-
-              // 调整大小并转回RGB
-              cv::Mat final_img;
-              cv::resize(combo, final_img, cv::Size(img_rect.width, img_rect.height));
-              cv::cvtColor(final_img, final_img, cv::COLOR_BGR2RGB);
-              cv::flip(final_img, final_img, 0);
-
-              mjr_drawPixels(final_img.data, nullptr, img_rect, &con);
-            } else {
-              // 无数据：显示暗红色占位符
-              mjr_rectangle(img_rect, 0.3f, 0.0f, 0.0f, 1.0f);
-            }
+          cv::Mat depth_linear(depth_u.size(), CV_32F);
+          for (int i = 0; i < (int)depth_u.total(); i++) {
+            float d = depth_u.ptr<float>()[i];
+            // d >= 1.0 表示背景/无穷远，设为 0 以便在伪彩色中显示为深蓝
+            depth_linear.ptr<float>()[i] =
+                (d >= 1.0f) ? 0.0f : znear / (1.0f - d * depth_ratio);
           }
+
+          cv::Mat depth_n, depth_c;
+          double max_depth;
+          cv::minMaxLoc(depth_linear, nullptr, &max_depth);
+
+          if (max_depth > 0.01) {
+            depth_linear.convertTo(depth_n, CV_8U, 255.0 / max_depth);
+            cv::applyColorMap(depth_n, depth_c, cv::COLORMAP_JET);
+          } else {
+            depth_c = cv::Mat::zeros(cam_h, cam_w, CV_8UC3);
+          }
+
+          cv::Mat rgb_bgr;
+          cv::cvtColor(rgb_u, rgb_bgr, cv::COLOR_RGB2BGR);
+
+          cv::Mat combo;
+          cv::hconcat(std::vector<cv::Mat>{depth_c, rgb_bgr}, combo);
+
+          cv::Mat final_img;
+          cv::resize(combo, final_img, cv::Size(img_rect.width, img_rect.height));
+          cv::cvtColor(final_img, final_img, cv::COLOR_BGR2RGB);
+          cv::flip(final_img, final_img, 0);
+
+          mjr_drawPixels(final_img.data, nullptr, img_rect, &con);
+        } else {
+          mjr_rectangle(img_rect, 0.3f, 0.0f, 0.0f, 1.0f);
         }
       }
     }
@@ -425,11 +452,24 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
   button_middle = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
   button_right = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
 
-  // 2. 更新 uistate
+  // 2. 更新 uistate（需要缩放到 framebuffer 坐标并翻转 Y 轴）
   double x, y;
   glfwGetCursorPos(window, &x, &y);
+
+  int fb_w, fb_h, win_w, win_h;
+  glfwGetFramebufferSize(window, &fb_w, &fb_h);
+  glfwGetWindowSize(window, &win_w, &win_h);
+  double ratio = (win_w > 0) ? static_cast<double>(fb_w) / win_w : 1.0;
+  x *= ratio;
+  y *= ratio;
+  y = fb_h - y;  // 翻转 Y 轴匹配 OpenGL 坐标系
+
   uistate.x = x;
   uistate.y = y;
+
+  // 更新鼠标所在区域
+  uistate.mouserect = mjr_findRect(static_cast<int>(x), static_cast<int>(y),
+                                    uistate.nrect - 1, uistate.rect + 1) + 1;
 
   uistate.type = (action == GLFW_PRESS) ? mjEVENT_PRESS : mjEVENT_RELEASE;
   // 映射按键
@@ -444,6 +484,7 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
   if (ui0_enable) {
     mjuiItem* it = mjui_event(&ui0, &uistate, &con);
     if (it) {
+      ui_dirty = true;
       // 处理特殊按钮事件
       if (strcmp(it->name, "Reset") == 0) {
         std::lock_guard<std::mutex> lock(sim_mutex);
@@ -469,20 +510,19 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
   // 4. 尝试传递给 UI1
   if (ui1_enable) {
     mjuiItem* it = mjui_event(&ui1, &uistate, &con);
-    if (it)
+    if (it) {
+      ui_dirty = true;
       return;
+    }
   }
 
   // 5. 3D 场景交互 (相机控制)
   if (action == GLFW_PRESS) {
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
-      // 点击图表扩展
+      // 点击图表扩展（x, y 已经是 OpenGL 坐标，无需再翻转）
       mjrRect r = fig_rect;
-      // 简单的点击检测 (注意 OpenGL Y轴反转)
-      int win_h;
-      glfwGetWindowSize(window, NULL, &win_h);
-      if (x >= r.left && x <= r.left + r.width && (win_h - y) >= r.bottom &&
-          (win_h - y) <= r.bottom + r.height) {
+      if (x >= r.left && x <= r.left + r.width &&
+          y >= r.bottom && y <= r.bottom + r.height) {
         if (button_middle)
           fig.flg_extend = !fig.flg_extend;
       }
@@ -493,9 +533,24 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
 }
 
 void RobotSim::handle_mouse_move(double xpos, double ypos) {
+  // 缩放到 framebuffer 坐标并翻转 Y 轴
+  int fb_w, fb_h, win_w, win_h;
+  glfwGetFramebufferSize(window, &fb_w, &fb_h);
+  glfwGetWindowSize(window, &win_w, &win_h);
+  double ratio = (win_w > 0) ? static_cast<double>(fb_w) / win_w : 1.0;
+  double x = xpos * ratio;
+  double y = fb_h - ypos * ratio;  // 翻转 Y 轴
+
   // 更新 uistate
-  uistate.x = xpos;
-  uistate.y = ypos;
+  uistate.dx = x - uistate.x;
+  uistate.dy = y - uistate.y;
+  uistate.x = x;
+  uistate.y = y;
+
+  // 更新鼠标所在区域
+  uistate.mouserect = mjr_findRect(static_cast<int>(x), static_cast<int>(y),
+                                    uistate.nrect - 1, uistate.rect + 1) + 1;
+
   uistate.type = mjEVENT_MOVE;
 
   // 传递给 UI (处理拖拽滑块等)
@@ -504,25 +559,25 @@ void RobotSim::handle_mouse_move(double xpos, double ypos) {
   if (ui1_enable)
     mjui_event(&ui1, &uistate, &con);
 
-  // 如果鼠标在 UI 上，不处理 3D 移动
+  // 如果鼠标在 UI 面板上，不处理 3D 移动
   if (uistate.mouserect == 1 || uistate.mouserect == 2)
     return;
 
-  // 检查鼠标是否在scene区域内（rect[0]）
-  if (uistate.mouserect != 0)
+  // 只在 scene 区域（rect[3]）或默认区域（0）时处理 3D 交互
+  if (uistate.mouserect != 0 && uistate.mouserect != 3)
     return;
 
   // 3D 相机移动
   if (!button_left && !button_right && !button_middle)
     return;
 
-  double dx = xpos - lastx;
-  double dy = ypos - lasty;
-  lastx = xpos;
-  lasty = ypos;
+  // 使用 framebuffer 坐标计算 delta（与 handle_mouse_button 中 lastx/lasty 一致）
+  double dx = x - lastx;
+  double dy = y - lasty;
+  lastx = x;
+  lasty = y;
 
-  int width, height;
-  glfwGetWindowSize(window, &width, &height);
+  int height = fb_h;
 
   bool mod_shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
   mjtMouse action;
@@ -559,15 +614,18 @@ void RobotSim::handle_keyboard(int key, int scancode, int act, int mods) {
   switch (key) {
     case GLFW_KEY_F1:
       ui0_enable = !ui0_enable;
+      ui_dirty = true;
       break;
     case GLFW_KEY_F2:
       ui1_enable = !ui1_enable;
+      ui_dirty = true;
       break;
     case GLFW_KEY_F5:
       info = !info;
       break;
     case GLFW_KEY_SPACE:
       run = !run;
+      ui_dirty = true;
       break;
     case GLFW_KEY_BACKSPACE: {
       std::lock_guard<std::mutex> lock(sim_mutex);
