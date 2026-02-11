@@ -1,5 +1,7 @@
 # Robot MuJoCo Simulation
 
+![运行效果图](docs/view.png)
+
 这是一个机器人控制的练习项目，使用MuJoCo作为仿真环境，支持多种机器人模型（如Boston Dynamics Spot和Unitree Go2）的步态控制和交互。
 
 ## 功能特性
