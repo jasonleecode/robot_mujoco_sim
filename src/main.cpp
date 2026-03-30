@@ -1,4 +1,3 @@
-#include <dds/dds.h>
 #include <mujoco/mujoco.h>
 
 #include <algorithm>
@@ -8,7 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -16,8 +15,12 @@
 
 #include "ControlActions.hpp"
 #include "RobotSim.hpp"
-#include "dds_generated/ControlMsg.h"
 #include "planner.h"
+
+#ifdef USE_DDS
+#include <dds/dds.h>
+#include "dds_generated/ControlMsg.h"
+#endif
 
 namespace {
 
@@ -25,15 +28,6 @@ constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
 // 物理循环频率：1000Hz (1ms)
 constexpr double kSimulationDt = 0.001;
 constexpr int kControlMsgSlots = 16;
-
-struct ScopedParticipant {
-  ~ScopedParticipant() {
-    if (handle > 0) {
-      dds_delete(handle);
-    }
-  }
-  dds_entity_t handle = DDS_ENTITY_NIL;
-};
 
 // 线程间共享数据结构
 struct SharedControlData {
@@ -51,6 +45,16 @@ struct SharedControlData {
   SharedControlData() {
     raw_values.resize(kControlMsgSlots, 0.0);
   }
+};
+
+#ifdef USE_DDS
+struct ScopedParticipant {
+  ~ScopedParticipant() {
+    if (handle > 0) {
+      dds_delete(handle);
+    }
+  }
+  dds_entity_t handle = DDS_ENTITY_NIL;
 };
 
 // 从 DDS 消息更新共享数据 (主线程调用)
@@ -108,6 +112,14 @@ bool PollDDSCommands(dds_entity_t reader, MujocoDDS_ControlMsg& latest_command) 
   return updated;
 }
 
+int RequireOk(int value, const char* label) {
+  if (value < 0) {
+    throw std::runtime_error(std::string(label) + ": " + dds_strretcode(-value));
+  }
+  return value;
+}
+#endif  // USE_DDS
+
 void PrintUsage(const char* binary_name) {
   std::cout << "Usage:\n  " << binary_name << " [path/to/model.xml]\n\n"
             << "When no path is provided the default model '" << kDefaultModel << "' is used.\n";
@@ -126,11 +138,41 @@ void SanityCheckRuntime() {
   }
 }
 
-int RequireOk(int value, const char* label) {
-  if (value < 0) {
-    throw std::runtime_error(std::string(label) + ": " + dds_strretcode(-value));
+// 加载 MuJoCo 插件（OBJ/STL 解码器等），在加载模型前调用
+void LoadMuJoCoPlugins() {
+  // 优先尝试与可执行文件同目录的插件（适合自定义部署）
+  // 然后回退到 ~/.mujoco/mujoco-X.X.X/bin/mujoco_plugin
+  const char* plugin_dirs[] = {
+    "mujoco_plugin",         // 相对路径（与二进制同目录时）
+    nullptr,                 // 用环境变量 MUJOCO_PLUGIN_DIR 覆盖
+  };
+
+  // 优先检查环境变量
+  if (const char* env_dir = std::getenv("MUJOCO_PLUGIN_DIR")) {
+    mj_loadAllPluginLibraries(env_dir, nullptr);
+    std::cout << "Loaded MuJoCo plugins from: " << env_dir << '\n';
+    return;
   }
-  return value;
+
+  // 否则从 MuJoCo 安装目录加载
+  const char* home = std::getenv("HOME");
+  if (home) {
+    // 尝试常见安装路径
+    const std::string candidates[] = {
+      std::string(home) + "/.mujoco/mujoco-3.6.0/bin/mujoco_plugin",
+      std::string(home) + "/.mujoco/mujoco-3.5.0/bin/mujoco_plugin",
+      std::string(home) + "/.mujoco/mujoco-3.4.0/bin/mujoco_plugin",
+    };
+    for (const auto& dir : candidates) {
+      if (std::filesystem::exists(dir)) {
+        mj_loadAllPluginLibraries(dir.c_str(), nullptr);
+        std::cout << "Loaded MuJoCo plugins from: " << dir << '\n';
+        return;
+      }
+    }
+  }
+  std::cerr << "Warning: MuJoCo plugin directory not found. OBJ meshes may fail to load.\n"
+            << "  Set MUJOCO_PLUGIN_DIR to your MuJoCo bin/mujoco_plugin directory.\n";
 }
 
 }  // namespace
@@ -147,6 +189,7 @@ int main(int argc, char** argv) {
   try {
     PrintUsage(argv[0]);
     SanityCheckRuntime();
+    LoadMuJoCoPlugins();
 
     const std::string model_path = ResolveModelPath(argc, argv);
     if (!std::filesystem::exists(model_path)) {
@@ -158,6 +201,7 @@ int main(int argc, char** argv) {
     const int num_actuators = robot.getNumActuators();
     std::cout << "Loaded model '" << model_path << "' with " << num_actuators << " actuators\n";
 
+#ifdef USE_DDS
     // DDS 初始化
     ScopedParticipant participant_guard;
     participant_guard.handle = RequireOk(
@@ -168,6 +212,9 @@ int main(int argc, char** argv) {
                   "dds_create_topic");
     const dds_entity_t reader = RequireOk(
         dds_create_reader(participant_guard.handle, topic, nullptr, nullptr), "dds_create_reader");
+#else
+    std::cout << "DDS disabled. Using Planner-only control mode.\n";
+#endif
 
     // 共享数据与 Planner
     SharedControlData shared_data;
@@ -191,7 +238,9 @@ int main(int argc, char** argv) {
     SpotPlanner planner;
     planner.setControlFrequency(kSimulationDt);
 
+#ifdef USE_DDS
     bool warned_clamp = false;
+#endif
 
     // --- 物理线程逻辑 (Fixed Time Step Loop) ---
     auto physics_loop = [&]() {
@@ -206,11 +255,11 @@ int main(int argc, char** argv) {
       std::vector<double> local_raw_values(num_actuators, 0.0);
 
       bool is_control_active = false;
-      // [新增] 归位相关变量
-      bool is_homing_complete = false;  // 是否完成归位
-      double homing_duration = 2.0;     // 归位耗时 2秒
-      double current_sim_time = 0.0;    // 仿真累积时间
-      std::vector<double> spawn_qpos;   // 出生时的关节角度
+      // 归位相关变量
+      bool is_homing_complete = false;
+      double homing_duration = 2.0;
+      double current_sim_time = 0.0;
+      std::vector<double> spawn_qpos;
 
       // 计时器
       auto next_tick = steady_clock::now();
@@ -231,7 +280,7 @@ int main(int argc, char** argv) {
         robot.getState(current_state);
 
         // 记录第一帧的出生姿态
-        if (spawn_qpos.empty() && current_state.qpos.size() >= num_actuators) {
+        if (spawn_qpos.empty() && current_state.qpos.size() >= static_cast<size_t>(num_actuators)) {
           spawn_qpos.resize(num_actuators);
           // 注意 MuJoCo qpos offset = 7
           for (int i = 0; i < num_actuators; ++i)
@@ -242,31 +291,22 @@ int main(int argc, char** argv) {
         if (local_use_planner) {
           // === 阶段一：软启动归位 (Homing) ===
           if (!is_homing_complete) {
-            // 获取 Planner 默认的标准站立姿态
-            // 此时 planner 处于 reset 状态，输出的就是 DEFAULT_ANGLE 定义的姿态
             std::vector<double> stand_target;
             planner.getJointTargets(stand_target);
 
-            // 计算进度 (0.0 -> 1.0)
             double progress = current_sim_time / homing_duration;
 
             if (progress < 1.0) {
-              // 平滑插值：从 spawn_qpos 慢慢过渡到 stand_target
-              // 使用 smoothstep 让起止更柔和: t * t * (3 - 2 * t)
               double smooth_t = progress * progress * (3 - 2 * progress);
-
               for (int i = 0; i < num_actuators; ++i) {
                 control_target[i] = lerp(spawn_qpos[i], stand_target[i], smooth_t);
               }
             } else {
-              // 归位完成
               is_homing_complete = true;
-              // 同步 planner 状态，防止瞬间跳变
               planner.setCurrentState(current_state);
               std::cout << "Homing Complete. Robot Standing." << std::endl;
             }
 
-            // 累加时间
             current_sim_time += kSimulationDt;
           }
           // === 阶段二：正常控制逻辑 ===
@@ -274,14 +314,10 @@ int main(int argc, char** argv) {
             if (!is_control_active && local_motion != control::BasicMotion::kStand) {
               std::cout << "Motion Command Received. Activating Planner..." << std::endl;
               is_control_active = true;
-
-              // [关键] 激活瞬间，强制同步 Planner 内部状态到当前真实状态
-              // 防止激活瞬间再次发生跳变
               planner.setCurrentState(current_state);
             }
 
             if (is_control_active) {
-              // === 正常规划逻辑 ===
               if (planner.mode() != local_motion) {
                 planner.setMode(local_motion);
               }
@@ -289,9 +325,6 @@ int main(int argc, char** argv) {
               planner.getJointTargets(control_target);
               robot.updatePlotData(control_target);
             } else {
-              // 待机状态：继续由 Planner 输出 Stand 姿态
-              // 因为已经归位了，Planner 的默认输出就是 Stand，所以直接用即可
-              // 这样比 "死锁当前位置" 更抗干扰，因为它会主动纠正回标准姿态
               planner.getJointTargets(control_target);
             }
           }
@@ -305,7 +338,7 @@ int main(int argc, char** argv) {
         robot.applyControlVector(control_target);
         robot.stepPhysics();
 
-        // 5. 休眠直到下一个时间片 (保持 500Hz)
+        // 5. 休眠直到下一个时间片
         next_tick += tick_interval;
         std::this_thread::sleep_until(next_tick);
       }
@@ -315,17 +348,20 @@ int main(int argc, char** argv) {
     sim_running.store(true, std::memory_order_release);
     physics_thread = std::thread(physics_loop);
 
-    // --- 主线程逻辑 (Rendering & DDS Input) ---
+    // --- 主线程逻辑 (Rendering & Input) ---
+#ifdef USE_DDS
     MujocoDDS_ControlMsg latest_command{};
+#endif
 
     while (true) {
-      // 1. 处理 DDS 消息 (非阻塞)
+#ifdef USE_DDS
+      // 处理 DDS 消息 (非阻塞)
       if (PollDDSCommands(reader, latest_command)) {
         CopyMessageToShared(latest_command, shared_data, warned_clamp);
       }
+#endif
 
-      // 2. 渲染帧
-      // renderFrame 内部已经优化了锁的使用，不会长时间阻塞物理线程
+      // 渲染帧
       robot.renderFrame();
 
       if (robot.windowShouldClose()) {

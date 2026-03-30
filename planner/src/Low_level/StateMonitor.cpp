@@ -86,7 +86,7 @@ void StateMonitor::publishLowCmd()
     
     if (paramsNotSet)
         return;
-    Eigen::Vector<double, 12> angles((double*) &(robotModel->getAngles()[0]));
+    Eigen::Matrix<double, 12, 1> angles((double*) &(robotModel->getAngles()[0]));
 
     get_crc(lowCmdMsg); //Check motor cmd crc
 

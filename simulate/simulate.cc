@@ -36,6 +36,11 @@
 #include "platform_ui_adapter.h"
 #include "array_safety.h"
 
+// MuJoCo 3.4+ removed MJDATA_POINTERS_PREAMBLE; define as no-op for compatibility
+#ifndef MJDATA_POINTERS_PREAMBLE
+#define MJDATA_POINTERS_PREAMBLE(m)
+#endif
+
 // When launched via an App Bundle on macOS, the working directory is the path to the App Bundle's
 // resource directory. This causes files to be saved into the bundle, which is not the desired
 // behavior. Instead, we open a save dialog box to ask the user where to put the file.

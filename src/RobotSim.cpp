@@ -188,7 +188,7 @@ void RobotSim::applyControlVector(const std::vector<double>& control) {
   std::lock_guard<std::mutex> lock(sim_mutex);
   if (!m || !d)
     return;
-  const int count = std::min(static_cast<int>(control.size()), m->nu);
+  const int count = std::min(static_cast<int>(control.size()), static_cast<int>(m->nu));
   for (int i = 0; i < count; ++i)
     d->ctrl[i] = control[i];
 }

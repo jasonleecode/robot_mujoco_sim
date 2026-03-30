@@ -37,18 +37,18 @@
                    -0.206297, 0.148259, -NOMINAL_HEIGHT\
                    } */
 
-#define SIT_POS {               \
+// Eigen 3.3 compatible: use comma-initializer (<<) instead of brace-init
+#define SIT_POS_VALS               \
     0.219434, -0.145806, -0.1,  \
     0.219236, 0.145221, -0.1,   \
     -0.169182, -0.166028, -0.1, \
-    -0.168096, 0.166349, -0.1}
+    -0.168096, 0.166349, -0.1
 
-//
-#define STAND_POS {                        \
+#define STAND_POS_VALS                     \
     0.169964, -0.139713, -NOMINAL_HEIGHT,  \
     0.190386, 0.147767, -NOMINAL_HEIGHT,   \
     -0.189777, -0.113354, -NOMINAL_HEIGHT, \
-    -0.209861, 0.144176, -NOMINAL_HEIGHT}
+    -0.209861, 0.144176, -NOMINAL_HEIGHT
 /*
 #define FR_SIT {0.219434, -0.145806, -0.1}
 #define FL_SIT {0.219236, 0.145221, -0.1}
@@ -127,8 +127,8 @@ private:
     LegMover *RR_legMover; /**< LegMover instance for the rear-right leg. */
     LegMover *RL_legMover; /**< LegMover instance for the rear-left leg. */
 
-    Eigen::Vector<double, 12> sitPos;   /**< Vector representing the robot's sitting position. */
-    Eigen::Vector<double, 12> standPos; /**< Vector representing the robot's standing position. */
+    Eigen::Matrix<double, 12, 1> sitPos;   /**< Vector representing the robot's sitting position. */
+    Eigen::Matrix<double, 12, 1> standPos; /**< Vector representing the robot's standing position. */
     bool standCmd = false;              /**< Boolean flag indicating if the stand command has been issued. */
 
 #ifdef ENABLE_ROS

@@ -13,6 +13,8 @@
 #include <cmath>
 #include <vector>
 #include <exception>
+#include <mutex>
+#include <thread>
 
 #ifdef ENABLE_ROS
 #include "rclcpp/rclcpp.hpp"

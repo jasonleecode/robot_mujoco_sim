@@ -28,8 +28,8 @@ StateMonitor(robotModel, nodeName), robotModel(robotModel)
     legMovers[2] = RR_legMover;
     legMovers[3] = RL_legMover;
 
-    standPos = STAND_POS;
-    sitPos = SIT_POS;
+    standPos << STAND_POS_VALS;
+    sitPos << SIT_POS_VALS;
 
 #ifdef ENABLE_ROS
     FR_moveTimer_ = this->create_wall_timer(std::chrono::milliseconds((int)(1000/PUB_RATE)),

@@ -10,7 +10,8 @@
 
 #include <atomic>
 #include <mutex>
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <string>
 #include <vector>
 

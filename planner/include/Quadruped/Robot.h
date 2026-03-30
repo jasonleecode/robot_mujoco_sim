@@ -207,9 +207,9 @@ class Robot {
    * @param f_ext The external force applied to the robot.
    * @return A vector containing the torques of all joints.
    */
-  Eigen::Vector<double, 12> calculateTaus(Eigen::Vector3d f_ext);
-  Eigen::Vector<double, 12> cntrlTau; /**< Control torques for the joints */
-  Eigen::Vector<double, 12> cmdTaus;  /**< Commanded torques for the joints */
+  Eigen::Matrix<double, 12, 1> calculateTaus(Eigen::Vector3d f_ext);
+  Eigen::Matrix<double, 12, 1> cntrlTau; /**< Control torques for the joints */
+  Eigen::Matrix<double, 12, 1> cmdTaus;  /**< Commanded torques for the joints */
 
   /*Eigen::Vector3d  getPosition(const std::vector<double> &angles, LegType leg);
   Eigen::Vector3d  getAngle(const std::vector<double> &angles, LegType leg);*/

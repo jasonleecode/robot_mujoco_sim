@@ -252,7 +252,7 @@ Eigen::Vector3d Robot::getOrientation()
     return Eigen::Vector3d((double*) &bodyOrientation[0]);
 }
 
-Eigen::Vector<double, 12> Robot::calculateTaus(Eigen::Vector3d f_ext)
+Eigen::Matrix<double, 12, 1> Robot::calculateTaus(Eigen::Vector3d f_ext)
 {
     std::vector<double> ret;
     for (int leg = 0; leg < LEG_NUM; leg++)
@@ -261,7 +261,7 @@ Eigen::Vector<double, 12> Robot::calculateTaus(Eigen::Vector3d f_ext)
         for (int joint = 0; joint < JOINT_NUM; joint++)
             ret.push_back(taus[joint]);
     }
-    return Eigen::Vector<double, 12>((double*) &ret[0]);
+    return Eigen::Matrix<double, 12, 1>((double*) &ret[0]);
 }
 
 void Robot::limitTaus()
