@@ -68,6 +68,13 @@ public:
         this->gaitCallback();
     }
 
+    // 停止后台定时器（在物理线程模式下必须调用，防止与 runStep() 竞争）
+    void stopGaitTimer() {
+#ifndef ENABLE_ROS
+        gaitTimer_.stop();
+#endif
+    }
+
     /**
      * @brief Set the current gait motion.
      * @param val The GaitMotion value to set.

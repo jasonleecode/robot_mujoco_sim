@@ -86,5 +86,7 @@ void BaseGait::publishLowCmd()
 
 BaseGait::~BaseGait()
 {
-    
+#ifndef ENABLE_ROS
+    gaitTimer_.stop();
+#endif
 }

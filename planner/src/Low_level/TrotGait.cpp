@@ -222,38 +222,44 @@ void TrotGait::forward() {
 }
 
 void TrotGait::backward() {
+  Eigen::Vector3d adj_FR = calculateBalanceAdjustment(robotModel, FR);
+  Eigen::Vector3d adj_FL = calculateBalanceAdjustment(robotModel, FL);
+  Eigen::Vector3d adj_RR = calculateBalanceAdjustment(robotModel, RR);
+  Eigen::Vector3d adj_RL = calculateBalanceAdjustment(robotModel, RL);
+
+  const double fr_back_arr[] = FR_BACK;   Eigen::Vector3d t_FR_Sw = macroToVec(fr_back_arr) + adj_FR;
+  const double rl_back_arr[] = RL_BACK;   Eigen::Vector3d t_RL_Sw = macroToVec(rl_back_arr) + adj_RL;
+  const double fl_back_arr[] = FL_BACK;   Eigen::Vector3d t_FL_Sw = macroToVec(fl_back_arr) + adj_FL;
+  const double rr_back_arr[] = RR_BACK;   Eigen::Vector3d t_RR_Sw = macroToVec(rr_back_arr) + adj_RR;
+
+  const double fl_front_arr[] = FL_FRONT; Eigen::Vector3d t_FL_St = macroToVec(fl_front_arr); t_FL_St[2] += adj_FL[2];
+  const double rr_front_arr[] = RR_FRONT; Eigen::Vector3d t_RR_St = macroToVec(rr_front_arr); t_RR_St[2] += adj_RR[2];
+  const double fr_front_arr[] = FR_FRONT; Eigen::Vector3d t_FR_St = macroToVec(fr_front_arr); t_FR_St[2] += adj_FR[2];
+  const double rl_front_arr[] = RL_FRONT; Eigen::Vector3d t_RL_St = macroToVec(rl_front_arr); t_RL_St[2] += adj_RL[2];
+
   switch (phase) {
     case 0:
       if (!legMovers[FR]->swingPhase)
-        legMovers[FR]->moveLegPosition(FR_BACK, stance_duration, SWING, swingHeight, 0);
+        legMovers[FR]->moveLegPosition(t_FR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RL]->swingPhase)
-        legMovers[RL]->moveLegPosition(RL_BACK, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RL]->moveLegPosition(t_RL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FL]->straightPhase)
-        legMovers[FL]->moveLegPosition(FL_FRONT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FL]->moveLegPosition(t_FL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RR]->straightPhase)
-        legMovers[RR]->moveLegPosition(RR_FRONT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RR]->moveLegPosition(t_RR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 1;
       delay = DELAY_TIME;
-
       break;
 
     case 1:
       if (!legMovers[FL]->swingPhase)
-        legMovers[FL]->moveLegPosition(FL_BACK, stance_duration, SWING, swingHeight, 0);
+        legMovers[FL]->moveLegPosition(t_FL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RR]->swingPhase)
-        legMovers[RR]->moveLegPosition(RR_BACK, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RR]->moveLegPosition(t_RR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FR]->straightPhase)
-        legMovers[FR]->moveLegPosition(FR_FRONT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FR]->moveLegPosition(t_FR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RL]->straightPhase)
-        legMovers[RL]->moveLegPosition(RL_FRONT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RL]->moveLegPosition(t_RL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 0;
       delay = DELAY_TIME;
       break;
@@ -261,38 +267,44 @@ void TrotGait::backward() {
 }
 
 void TrotGait::right() {
+  Eigen::Vector3d adj_FR = calculateBalanceAdjustment(robotModel, FR);
+  Eigen::Vector3d adj_FL = calculateBalanceAdjustment(robotModel, FL);
+  Eigen::Vector3d adj_RR = calculateBalanceAdjustment(robotModel, RR);
+  Eigen::Vector3d adj_RL = calculateBalanceAdjustment(robotModel, RL);
+
+  const double fr_sr[] = FR_SIDE_RIGHT; Eigen::Vector3d t_FR_Sw = macroToVec(fr_sr) + adj_FR;
+  const double rl_sr[] = RL_SIDE_RIGHT; Eigen::Vector3d t_RL_Sw = macroToVec(rl_sr) + adj_RL;
+  const double fl_sr[] = FL_SIDE_RIGHT; Eigen::Vector3d t_FL_Sw = macroToVec(fl_sr) + adj_FL;
+  const double rr_sr[] = RR_SIDE_RIGHT; Eigen::Vector3d t_RR_Sw = macroToVec(rr_sr) + adj_RR;
+
+  const double fl_sl[] = FL_SIDE_LEFT; Eigen::Vector3d t_FL_St = macroToVec(fl_sl); t_FL_St[2] += adj_FL[2];
+  const double rr_sl[] = RR_SIDE_LEFT; Eigen::Vector3d t_RR_St = macroToVec(rr_sl); t_RR_St[2] += adj_RR[2];
+  const double fr_sl[] = FR_SIDE_LEFT; Eigen::Vector3d t_FR_St = macroToVec(fr_sl); t_FR_St[2] += adj_FR[2];
+  const double rl_sl[] = RL_SIDE_LEFT; Eigen::Vector3d t_RL_St = macroToVec(rl_sl); t_RL_St[2] += adj_RL[2];
+
   switch (phase) {
     case 0:
       if (!legMovers[FR]->swingPhase)
-        legMovers[FR]->moveLegPosition(FR_SIDE_RIGHT, stance_duration, SWING, swingHeight, 0);
+        legMovers[FR]->moveLegPosition(t_FR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RL]->swingPhase)
-        legMovers[RL]->moveLegPosition(RL_SIDE_RIGHT, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RL]->moveLegPosition(t_RL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FL]->straightPhase)
-        legMovers[FL]->moveLegPosition(FL_SIDE_LEFT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FL]->moveLegPosition(t_FL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RR]->straightPhase)
-        legMovers[RR]->moveLegPosition(RR_SIDE_LEFT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RR]->moveLegPosition(t_RR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 1;
       delay = DELAY_TIME;
-
       break;
 
     case 1:
       if (!legMovers[FL]->swingPhase)
-        legMovers[FL]->moveLegPosition(FL_SIDE_RIGHT, stance_duration, SWING, swingHeight, 0);
+        legMovers[FL]->moveLegPosition(t_FL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RR]->swingPhase)
-        legMovers[RR]->moveLegPosition(RR_SIDE_RIGHT, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RR]->moveLegPosition(t_RR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FR]->straightPhase)
-        legMovers[FR]->moveLegPosition(FR_SIDE_LEFT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FR]->moveLegPosition(t_FR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RL]->straightPhase)
-        legMovers[RL]->moveLegPosition(RL_SIDE_LEFT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RL]->moveLegPosition(t_RL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 0;
       delay = DELAY_TIME;
       break;
@@ -360,37 +372,44 @@ void TrotGait::jump() {
 }
 
 void TrotGait::left() {
+  Eigen::Vector3d adj_FR = calculateBalanceAdjustment(robotModel, FR);
+  Eigen::Vector3d adj_FL = calculateBalanceAdjustment(robotModel, FL);
+  Eigen::Vector3d adj_RR = calculateBalanceAdjustment(robotModel, RR);
+  Eigen::Vector3d adj_RL = calculateBalanceAdjustment(robotModel, RL);
+
+  const double fr_sl[] = FR_SIDE_LEFT; Eigen::Vector3d t_FR_Sw = macroToVec(fr_sl) + adj_FR;
+  const double rl_sl[] = RL_SIDE_LEFT; Eigen::Vector3d t_RL_Sw = macroToVec(rl_sl) + adj_RL;
+  const double fl_sl[] = FL_SIDE_LEFT; Eigen::Vector3d t_FL_Sw = macroToVec(fl_sl) + adj_FL;
+  const double rr_sl[] = RR_SIDE_LEFT; Eigen::Vector3d t_RR_Sw = macroToVec(rr_sl) + adj_RR;
+
+  const double fl_sr[] = FL_SIDE_RIGHT; Eigen::Vector3d t_FL_St = macroToVec(fl_sr); t_FL_St[2] += adj_FL[2];
+  const double rr_sr[] = RR_SIDE_RIGHT; Eigen::Vector3d t_RR_St = macroToVec(rr_sr); t_RR_St[2] += adj_RR[2];
+  const double fr_sr[] = FR_SIDE_RIGHT; Eigen::Vector3d t_FR_St = macroToVec(fr_sr); t_FR_St[2] += adj_FR[2];
+  const double rl_sr[] = RL_SIDE_RIGHT; Eigen::Vector3d t_RL_St = macroToVec(rl_sr); t_RL_St[2] += adj_RL[2];
+
   switch (phase) {
     case 0:
       if (!legMovers[FR]->swingPhase)
-        legMovers[FR]->moveLegPosition(FR_SIDE_LEFT, stance_duration, SWING, swingHeight, 0);
+        legMovers[FR]->moveLegPosition(t_FR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RL]->swingPhase)
-        legMovers[RL]->moveLegPosition(RL_SIDE_LEFT, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RL]->moveLegPosition(t_RL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FL]->straightPhase)
-        legMovers[FL]->moveLegPosition(FL_SIDE_RIGHT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FL]->moveLegPosition(t_FL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RR]->straightPhase)
-        legMovers[RR]->moveLegPosition(RR_SIDE_RIGHT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RR]->moveLegPosition(t_RR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 1;
       delay = DELAY_TIME;
       break;
 
     case 1:
       if (!legMovers[FL]->swingPhase)
-        legMovers[FL]->moveLegPosition(FL_SIDE_LEFT, stance_duration, SWING, swingHeight, 0);
+        legMovers[FL]->moveLegPosition(t_FL_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[RR]->swingPhase)
-        legMovers[RR]->moveLegPosition(RR_SIDE_LEFT, stance_duration, SWING, swingHeight, 0);
-
+        legMovers[RR]->moveLegPosition(t_RR_Sw, stance_duration, SWING, swingHeight, 0);
       if (!legMovers[FR]->straightPhase)
-        legMovers[FR]->moveLegPosition(FR_SIDE_RIGHT, stance_duration, STRAIGHT, stanceDepth, 0);
+        legMovers[FR]->moveLegPosition(t_FR_St, stance_duration, STRAIGHT, stanceDepth, 0);
       if (!legMovers[RL]->straightPhase)
-        legMovers[RL]->moveLegPosition(RL_SIDE_RIGHT, stance_duration, STRAIGHT, stanceDepth, 0);
-
-      // standing = false;
-
+        legMovers[RL]->moveLegPosition(t_RL_St, stance_duration, STRAIGHT, stanceDepth, 0);
       phase = 0;
       delay = DELAY_TIME;
       break;

@@ -12,12 +12,12 @@
 #include "Quadruped/Link.h"
 #include <Eigen/Dense>
 
-#define LEN_THIGH 0.2130
-#define LEN_HIP 0.0955
-#define LEN_CALF 0.23
+#define LEN_THIGH 0.32     // Spot: fl_lleg pos z=0.32
+#define LEN_HIP 0.1108     // Spot: fl_uleg pos y=0.1108
+#define LEN_CALF 0.3365    // Spot: foot geom pos z=0.3365
 #define ladj 0
-#define LEN_BASE 0.3868
-#define WIDTH_BASE 0.092
+#define LEN_BASE 0.5957    // Spot: fl_hip pos x=0.29785 * 2
+#define WIDTH_BASE 0.110   // Spot: fl_hip pos y=0.055 * 2
 #define HEIGHT_BASE -0.000
 
 #define HIP_UP_LIM 0.7
@@ -32,7 +32,7 @@
 #define CALF_LO_LIM -2.9
 #define DEFAULT_ANGLE_CALF -1.8
 
-#define CALF_OFFSET 0.0873
+#define CALF_OFFSET 0.0780  // Spot: atan2(0.025, 0.32) ≈ 0.0780 rad
 // #define CALF_OFFSET 0.0
 
 /**

@@ -12,6 +12,10 @@ SpotPlanner::SpotPlanner() : last_time_(0.0), mode_(control::BasicMotion::kDefau
   // 在非 ROS 模式下，nodeName 可以为空
   trot_gait_ = std::make_unique<TrotGait>(&planner_robot_, "");
 
+  // 停止后台定时器：物理线程通过 runStep() 直接驱动步态，不需要定时器线程
+  // 不停止会导致定时器线程与物理线程同时调用 gaitCallback()，产生数据竞争
+  trot_gait_->stopGaitTimer();
+
   // 2. 初始化一些默认参数 (例如步态频率、高度等)
   trot_gait_->setStanceDuration(250);
 }
@@ -176,6 +180,8 @@ void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
   double body_vy = -sin(y) * world_vx + cos(y) * world_vy;
 
   planner_robot_.setLinearVelocity(body_vx, body_vy, 0);
+  // 同步姿态角：balanceAdjustment 中的姿态修正依赖此值，不设则 roll/pitch 恒为 0
+  planner_robot_.setOrientation(static_cast<float>(r), static_cast<float>(p), static_cast<float>(y));
 }
 
 // Planner Robot (q_target) -> qref (发送给 MuJoCo)
