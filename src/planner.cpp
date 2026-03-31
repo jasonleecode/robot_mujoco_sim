@@ -73,6 +73,98 @@ void SpotPlanner::update(const RobotState& state) {
     return;
   last_time_ = state.time;
 
+  // ===================================================================
+  // 诊断日志：每 100ms 打印一次完整姿态+步态状态
+  // ===================================================================
+  static double last_log_time = -1.0;
+  if (state.time - last_log_time >= 0.1) {
+    last_log_time = state.time;
+
+    // --- 身体位姿 ---
+    double bx = (state.qpos.size() > 0) ? state.qpos[0] : 0.0;
+    double by = (state.qpos.size() > 1) ? state.qpos[1] : 0.0;
+    double bz = (state.qpos.size() > 2) ? state.qpos[2] : 0.0;
+
+    // 四元数
+    double qw = state.imu_quat[0], qx = state.imu_quat[1];
+    double qy = state.imu_quat[2], qz = state.imu_quat[3];
+    double zproj = 1.0 - 2.0 * (qx * qx + qy * qy);  // Body-Z 直立度
+
+    double r_log = 0, p_log = 0, y_log = 0;
+    if (state.imu_quat.size() >= 4) toEulerAngle(state.imu_quat, r_log, p_log, y_log);
+
+    // --- 身体速度 ---
+    double vx = (state.qvel.size() > 0) ? state.qvel[0] : 0.0;
+    double vy = (state.qvel.size() > 1) ? state.qvel[1] : 0.0;
+    double vz = (state.qvel.size() > 2) ? state.qvel[2] : 0.0;
+    double wx = (state.qvel.size() > 3) ? state.qvel[3] : 0.0;  // 角速度
+    double wy = (state.qvel.size() > 4) ? state.qvel[4] : 0.0;
+    double wz = (state.qvel.size() > 5) ? state.qvel[5] : 0.0;
+
+    // --- 实际关节角（MuJoCo qpos 偏移7开始，FL/FR/RL/RR 顺序）---
+    // MuJoCo 顺序: 0=FL, 1=FR, 2=RL, 3=RR (每腿3关节: hip,thigh,calf)
+    auto qget = [&](int leg, int joint) -> double {
+      int idx = 7 + leg * 3 + joint;
+      return (idx < (int)state.qpos.size()) ? state.qpos[idx] : 0.0;
+    };
+
+    // --- 关节目标 (planner qTarg 顺序: FR=0, FL=1, RR=2, RL=3) ---
+    const auto& qt = trot_gait_->qTarg;
+
+    // --- 步态状态 ---
+    bool fr_sw = trot_gait_->legMovers[FR]->swingPhase;
+    bool fl_sw = trot_gait_->legMovers[FL]->swingPhase;
+    bool rr_sw = trot_gait_->legMovers[RR]->swingPhase;
+    bool rl_sw = trot_gait_->legMovers[RL]->swingPhase;
+    bool fr_st = trot_gait_->legMovers[FR]->straightPhase;
+    bool fl_st = trot_gait_->legMovers[FL]->straightPhase;
+    bool rr_st = trot_gait_->legMovers[RR]->straightPhase;
+    bool rl_st = trot_gait_->legMovers[RL]->straightPhase;
+
+    // --- 脚的实际位置（由 FK 计算）---
+    // planner_robot_ 的关节已在 mapMujocoToPlanner 中设置
+    Eigen::Vector3d pos_FR = planner_robot_.getPosition_FR();
+    Eigen::Vector3d pos_FL = planner_robot_.getPosition_FL();
+    Eigen::Vector3d pos_RR = planner_robot_.getPosition_RR();
+    Eigen::Vector3d pos_RL = planner_robot_.getPosition_RL();
+
+    printf("\n======== T=%.3f ========\n", state.time);
+    printf("[BODY]  pos=(%.3f, %.3f, %.3f)  zproj=%.3f  fallen=%d\n",
+           bx, by, bz, zproj, (int)is_fallen_);
+    printf("[RPY ]  roll=%.2fdeg  pitch=%.2fdeg  yaw=%.2fdeg\n",
+           r_log * 57.3, p_log * 57.3, y_log * 57.3);
+    printf("[QUAT]  w=%.3f x=%.3f y=%.3f z=%.3f\n", qw, qx, qy, qz);
+    printf("[VEL ]  lin=(%.3f,%.3f,%.3f)  ang=(%.3f,%.3f,%.3f)\n",
+           vx, vy, vz, wx, wy, wz);
+    printf("[GAIT]  active=%d  mode=%d  leg_sw(FR,FL,RR,RL)=(%d,%d,%d,%d)  st=(%d,%d,%d,%d)\n",
+           (int)trot_gait_->active, (int)mode_,
+           (int)fr_sw, (int)fl_sw, (int)rr_sw, (int)rl_sw,
+           (int)fr_st, (int)fl_st, (int)rr_st, (int)rl_st);
+    // 实际关节角 (MuJoCo qpos: leg0=FL, leg1=FR, leg2=RL, leg3=RR)
+    printf("[QACT]  FL=(%.2f,%.2f,%.2f)  FR=(%.2f,%.2f,%.2f)"
+           "  RL=(%.2f,%.2f,%.2f)  RR=(%.2f,%.2f,%.2f)\n",
+           qget(0,0), qget(0,1), qget(0,2),
+           qget(1,0), qget(1,1), qget(1,2),
+           qget(2,0), qget(2,1), qget(2,2),
+           qget(3,0), qget(3,1), qget(3,2));
+    // 关节目标 (planner qTarg: FR=0, FL=1, RR=2, RL=3)
+    printf("[QTGT]  FR=(%.2f,%.2f,%.2f)  FL=(%.2f,%.2f,%.2f)"
+           "  RR=(%.2f,%.2f,%.2f)  RL=(%.2f,%.2f,%.2f)\n",
+           qt[0], qt[1], qt[2],
+           qt[3], qt[4], qt[5],
+           qt[6], qt[7], qt[8],
+           qt[9], qt[10], qt[11]);
+    // 脚的 FK 位置（body frame）
+    printf("[FOOT]  FR=(%.3f,%.3f,%.3f)  FL=(%.3f,%.3f,%.3f)"
+           "  RR=(%.3f,%.3f,%.3f)  RL=(%.3f,%.3f,%.3f)\n",
+           pos_FR[0], pos_FR[1], pos_FR[2],
+           pos_FL[0], pos_FL[1], pos_FL[2],
+           pos_RR[0], pos_RR[1], pos_RR[2],
+           pos_RL[0], pos_RL[1], pos_RL[2]);
+    fflush(stdout);
+  }
+  // ===================================================================
+
   // 2. 状态映射 (保持不变)
   mapMujocoToPlanner(state);
 
@@ -180,8 +272,20 @@ void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
   double body_vy = -sin(y) * world_vx + cos(y) * world_vy;
 
   planner_robot_.setLinearVelocity(body_vx, body_vy, 0);
-  // 同步姿态角：balanceAdjustment 中的姿态修正依赖此值，不设则 roll/pitch 恒为 0
+  // 同步姿态角
   planner_robot_.setOrientation(static_cast<float>(r), static_cast<float>(p), static_cast<float>(y));
+
+  // 同步角速度 (world frame qvel[3..5] = wx,wy,wz，近似等于 body frame 角速度)
+  double wx = (state.qvel.size() > 3) ? state.qvel[3] : 0.0;
+  double wy = (state.qvel.size() > 4) ? state.qvel[4] : 0.0;
+  double wz = (state.qvel.size() > 5) ? state.qvel[5] : 0.0;
+  planner_robot_.setAngularVelocity(wx, wy, wz);
+
+  // 同步机身世界坐标 (用于横向位置修正)
+  double bx = (state.qpos.size() > 0) ? state.qpos[0] : 0.0;
+  double by = (state.qpos.size() > 1) ? state.qpos[1] : 0.0;
+  double bz = (state.qpos.size() > 2) ? state.qpos[2] : 0.0;
+  planner_robot_.setBodyPosition(bx, by, bz);
 }
 
 // Planner Robot (q_target) -> qref (发送给 MuJoCo)

@@ -21,6 +21,30 @@ void TrotGait::gaitCallback() {
       return;
 
     if (active) {
+      // 步态相位切换日志
+      static int last_logged_phase = -1;
+      static GaitMotion last_logged_motion = GAIT_MOTION_NUM;
+      static long long step_count = 0;
+      if (phase != last_logged_phase || gaitMotion != last_logged_motion) {
+        const char* motion_names[] = {"STOP","STANDUP","FORWARD","BACKWARD","LEFT","RIGHT","JUMP","DEFAULT","NONE"};
+        const char* mname = (gaitMotion < GAIT_MOTION_NUM) ? motion_names[gaitMotion] : "NONE";
+        // 腿状态：S=swing, T=stance(straight), I=idle
+        auto leg_state = [&](int idx) -> char {
+          if (legMovers[idx]->swingPhase) return 'S';
+          if (legMovers[idx]->straightPhase) return 'T';
+          return 'I';
+        };
+        printf("[STEP #%lld] motion=%-8s  phase: %d->%d  "
+               "legs(FR,FL,RR,RL)=(%c,%c,%c,%c)  delay=%lld\n",
+               step_count++, mname,
+               last_logged_phase, phase,
+               leg_state(FR), leg_state(FL), leg_state(RR), leg_state(RL),
+               delay);
+        fflush(stdout);
+        last_logged_phase = phase;
+        last_logged_motion = gaitMotion;
+      }
+
       switch (gaitMotion) {
         case STOP:
           stand();
@@ -68,38 +92,42 @@ void TrotGait::gaitCallback() {
 // robot: 机器人模型指针
 // legID: 腿的索引 (0:FR, 1:FL, 2:RR, 3:RL)
 static Eigen::Vector3d calculateBalanceAdjustment(Robot* robot, int legID) {
-  // 1. 获取当前姿态 (Roll, Pitch) 和 速度 (Vx, Vy)
-  Eigen::Vector3d rpy = robot->getOrientation();
-  Eigen::Vector3d vel = robot->getLinearVelocity();
+  Eigen::Vector3d rpy    = robot->getOrientation();
+  Eigen::Vector3d vel    = robot->getLinearVelocity();
+  Eigen::Vector3d angvel = robot->getAngularVelocity();
+  Eigen::Vector3d bpos   = robot->getBodyPosition();
 
-  double roll = rpy[0];
-  double pitch = rpy[1];
+  double roll       = rpy[0];
+  double pitch      = rpy[1];
+  double roll_rate  = angvel[0];
+  double pitch_rate = angvel[1];
 
-  // 2. 姿态平衡控制 (Z轴修正)
-  // 目的：身体倾斜时，通过伸缩腿长来保持身体水平
-  // 符号定义：
-  // FR(0): 右前 | FL(1): 左前 | RR(2): 右后 | RL(3): 左后
-  int sign_y = (legID == 0 || legID == 2) ? -1 : 1;  // 右侧为负(-1)，左侧为正(+1)
-  int sign_x = (legID == 0 || legID == 1) ? 1 : -1;  // 前侧为正(+1)，后侧为负(-1)
+  int sign_y = (legID == 0 || legID == 2) ? -1 : 1;
+  int sign_x = (legID == 0 || legID == 1) ?  1 : -1;
 
-  // 参数增益 (需根据实际仿真效果微调)
-  double k_roll = 0.2;   // Roll 增益
-  double k_pitch = 0.2;  // Pitch 增益
+  // === Y轴（横向，最关键）: Raibert capture point + 横向位置恢复 ===
+  // 上次 k_vel=0.05, clamp=0.04 → STEP#7时vy=0.454，修正只有1.9cm
+  // 实际需要: vy * T_swing/2 = 0.454 * 0.125 ≈ 5.7cm
+  // 将 k_vel 提高到 0.15（约 Raibert T/2 的近似）
+  // k_lat 加大到 0.25，让横向漂移时落脚点能主动向漂移方向跟进
+  double k_vy      = 0.15;
+  double k_lat_pos = 0.25;
+  double y_correction = vel[1] * k_vy + bpos[1] * k_lat_pos;
+  y_correction = std::max(-0.08, std::min(0.08, y_correction));
 
-  // 计算 Z 轴修正量
-  // 例如：向右倾斜(Roll>0)，右腿需要伸长(Z更负)，所以 z_correction 应为负值
-  // sign_y(-1) * roll(+) * k -> 负值 -> 正确
-  double z_correction = sign_y * roll * k_roll - sign_x * pitch * k_pitch;
+  // === Z轴（腿长）: 轻微平衡 + 少量角速度阻尼 ===
+  // 减小增益，防止IK在大roll时目标z失控
+  double k_roll_p  = 0.02;
+  double k_pitch_p = 0.02;
+  double k_roll_d  = 0.03;
+  double k_pitch_d = 0.03;
+  double z_correction = sign_y * (roll * k_roll_p + roll_rate * k_roll_d)
+                      - sign_x * (pitch * k_pitch_p + pitch_rate * k_pitch_d);
+  z_correction = std::max(-0.03, std::min(0.03, z_correction));
 
-  // 3. Raibert Heuristic (X/Y轴速度修正)
-  // 目的：防止摔倒，根据当前速度调整下一个落足点
-  // Target = Nominal + Vel * T_stance / 2 + k * (Vel - Vel_cmd)
-  // 这里使用简化版：Offset = Vel * Gain
-  double k_vel = 0.15;  // 速度增益，速度越快步幅修正越大
-  double x_correction = vel[0] * k_vel;
-  double y_correction = vel[1] * k_vel;
+  // === X轴: 前进速度修正 ===
+  double x_correction = std::max(-0.03, std::min(0.03, vel[0] * 0.05));
 
-  // 返回总修正向量
   return Eigen::Vector3d(x_correction, y_correction, z_correction);
 }
 
@@ -184,6 +212,31 @@ void TrotGait::forward() {
   target_RL_Stance[2] += adj_RL[2];
 
   // --- 4. 执行状态机 ---
+  // 打印本次落脚目标及平衡修正量
+  {
+    Eigen::Vector3d rpy = robotModel->getOrientation();
+    Eigen::Vector3d vel = robotModel->getLinearVelocity();
+    printf("[FORWARD ph=%d] rpy=(%.1f,%.1f,%.1f)deg  vel=(%.3f,%.3f)\n"
+           "  adj: FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
+           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n"
+           "  swing_tgt: FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
+           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n"
+           "  stance_tgt:FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
+           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n",
+           phase, rpy[0]*57.3, rpy[1]*57.3, rpy[2]*57.3, vel[0], vel[1],
+           adj_FR[0],adj_FR[1],adj_FR[2], adj_FL[0],adj_FL[1],adj_FL[2],
+           adj_RR[0],adj_RR[1],adj_RR[2], adj_RL[0],adj_RL[1],adj_RL[2],
+           target_FR_Swing[0],target_FR_Swing[1],target_FR_Swing[2],
+           target_FL_Swing[0],target_FL_Swing[1],target_FL_Swing[2],
+           target_RR_Swing[0],target_RR_Swing[1],target_RR_Swing[2],
+           target_RL_Swing[0],target_RL_Swing[1],target_RL_Swing[2],
+           target_FR_Stance[0],target_FR_Stance[1],target_FR_Stance[2],
+           target_FL_Stance[0],target_FL_Stance[1],target_FL_Stance[2],
+           target_RR_Stance[0],target_RR_Stance[1],target_RR_Stance[2],
+           target_RL_Stance[0],target_RL_Stance[1],target_RL_Stance[2]);
+    fflush(stdout);
+  }
+
   switch (phase) {
     case 0:
       // Group 1: FR & RL (Swing 摆动)

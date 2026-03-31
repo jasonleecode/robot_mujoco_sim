@@ -202,6 +202,22 @@ class Robot {
     return Eigen::Vector3d(bodyVel[0], bodyVel[1], bodyVel[2]);
   }
 
+  // 设置和获取基座角速度 (body frame: wx=roll rate, wy=pitch rate, wz=yaw rate)
+  void setAngularVelocity(double wx, double wy, double wz) {
+    bodyAngVel = {wx, wy, wz};
+  }
+  Eigen::Vector3d getAngularVelocity() {
+    return Eigen::Vector3d(bodyAngVel[0], bodyAngVel[1], bodyAngVel[2]);
+  }
+
+  // 设置和获取机身世界坐标位置 (x, y, z)
+  void setBodyPosition(double x, double y, double z) {
+    bodyPos = {x, y, z};
+  }
+  Eigen::Vector3d getBodyPosition() {
+    return Eigen::Vector3d(bodyPos[0], bodyPos[1], bodyPos[2]);
+  }
+
   /**
    * @brief Calculate the joint torques for all legs based on an external force.
    * @param f_ext The external force applied to the robot.
@@ -215,7 +231,9 @@ class Robot {
   Eigen::Vector3d  getAngle(const std::vector<double> &angles, LegType leg);*/
 
  private:
-  std::vector<double> bodyVel = {0, 0, 0};
+  std::vector<double> bodyVel    = {0, 0, 0};
+  std::vector<double> bodyAngVel = {0, 0, 0};
+  std::vector<double> bodyPos    = {0, 0, 0};
   Leg FL, FR, RL, RR;
   /**
    * @brief Helper function to set values using a specific function for all joints.

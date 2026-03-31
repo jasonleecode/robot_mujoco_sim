@@ -338,6 +338,33 @@ int main(int argc, char** argv) {
         robot.applyControlVector(control_target);
         robot.stepPhysics();
 
+        // === 诊断：每 500ms 打印一次物理层身体状态 ===
+        static int phys_log_counter = 0;
+        if (++phys_log_counter >= 500) {
+          phys_log_counter = 0;
+          if (current_state.qpos.size() >= 7) {
+            double bz   = current_state.qpos[2];
+            double q_w  = current_state.qpos[3];
+            double q_x  = current_state.qpos[4];
+            double q_y  = current_state.qpos[5];
+            double q_z  = current_state.qpos[6];
+            double zproj = 1.0 - 2.0*(q_x*q_x + q_y*q_y);
+            // 欧拉角：roll/pitch
+            double sinr  = 2*(q_w*q_x + q_y*q_z);
+            double cosr  = 1 - 2*(q_x*q_x + q_y*q_y);
+            double roll  = std::atan2(sinr, cosr) * 57.3;
+            double sinp  = 2*(q_w*q_y - q_z*q_x);
+            double pitch = (std::abs(sinp) >= 1) ? std::copysign(90.0, sinp)
+                                                  : std::asin(sinp) * 57.3;
+            printf("[PHYS t=%.2f] body_z=%.3f  zproj=%.3f  roll=%.1fdeg  pitch=%.1fdeg"
+                   "  homing=%s  ctrl_active=%s\n",
+                   current_state.time, bz, zproj, roll, pitch,
+                   is_homing_complete ? "done" : "...",
+                   is_control_active ? "yes" : "no");
+            fflush(stdout);
+          }
+        }
+
         // 5. 休眠直到下一个时间片
         next_tick += tick_interval;
         std::this_thread::sleep_until(next_tick);
