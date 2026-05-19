@@ -17,10 +17,29 @@ void TrotGait::gaitCallback() {
     return;
   } else {
     if (legMovers[FR]->straightPhase || legMovers[FL]->straightPhase ||
-        legMovers[RR]->straightPhase || legMovers[RL]->straightPhase)
+        legMovers[RR]->straightPhase || legMovers[RL]->straightPhase ||
+        legMovers[FR]->swingPhase   || legMovers[FL]->swingPhase   ||
+        legMovers[RR]->swingPhase   || legMovers[RL]->swingPhase)
       return;
 
     if (active) {
+      // === 早期倾斜安全保护 ===
+      // 在执行步态前检测倾斜程度，防止大角度时继续行走加剧倾倒
+      {
+        Eigen::Vector3d rpy = robotModel->getOrientation();
+        double roll_abs  = std::abs(rpy[0]);
+        double pitch_abs = std::abs(rpy[1]);
+        // 超过 22°：强制切换到站立（避免过早停止干扰修正步态）
+        if ((roll_abs > 0.384 || pitch_abs > 0.384) &&
+            (gaitMotion == FORWARD || gaitMotion == BACKWARD ||
+             gaitMotion == LEFT    || gaitMotion == RIGHT)) {
+          printf("[SAFETY] Large tilt (roll=%.1fdeg pitch=%.1fdeg), forcing STOP\n",
+                 rpy[0] * 57.3, rpy[1] * 57.3);
+          fflush(stdout);
+          gaitMotion = STOP;
+        }
+      }
+
       // 步态相位切换日志
       static int last_logged_phase = -1;
       static GaitMotion last_logged_motion = GAIT_MOTION_NUM;
@@ -99,31 +118,41 @@ static Eigen::Vector3d calculateBalanceAdjustment(Robot* robot, int legID) {
 
   double roll       = rpy[0];
   double pitch      = rpy[1];
+  double yaw        = rpy[2];
   double roll_rate  = angvel[0];
   double pitch_rate = angvel[1];
+  double yaw_rate   = angvel[2];
 
+  // sign_y: FR(0),RR(2)=-1(右侧腿); FL(1),RL(3)=+1(左侧腿)
+  // sign_x: FR(0),FL(1)=+1(前腿);   RR(2),RL(3)=-1(后腿)
   int sign_y = (legID == 0 || legID == 2) ? -1 : 1;
   int sign_x = (legID == 0 || legID == 1) ?  1 : -1;
 
-  // === Y轴（横向，最关键）: Raibert capture point + 横向位置恢复 ===
-  // 上次 k_vel=0.05, clamp=0.04 → STEP#7时vy=0.454，修正只有1.9cm
-  // 实际需要: vy * T_swing/2 = 0.454 * 0.125 ≈ 5.7cm
-  // 将 k_vel 提高到 0.15（约 Raibert T/2 的近似）
-  // k_lat 加大到 0.25，让横向漂移时落脚点能主动向漂移方向跟进
-  double k_vy      = 0.15;
-  double k_lat_pos = 0.25;
-  double y_correction = vel[1] * k_vy + bpos[1] * k_lat_pos;
-  y_correction = std::max(-0.08, std::min(0.08, y_correction));
+  // === Y轴（横向）: Raibert capture point + yaw阻尼 ===
+  // bpos[1] 是世界坐标系 Y，不能加到体坐标系落脚目标上，已移除该项
+  double k_vy  = 0.18;
+  double y_correction = vel[1] * k_vy;
 
-  // === Z轴（腿长）: 轻微平衡 + 少量角速度阻尼 ===
-  // 减小增益，防止IK在大roll时目标z失控
-  double k_roll_p  = 0.02;
-  double k_pitch_p = 0.02;
-  double k_roll_d  = 0.03;
-  double k_pitch_d = 0.03;
+  // Roll capture point: shift all feet toward falling side (roll<0=left down → +y)
+  double k_roll_lat = 0.15;
+  y_correction += -roll * k_roll_lat;
+
+  // Yaw damping — keep gains low to avoid yaw oscillation
+  double k_yaw_p = 0.04;
+  double k_yaw_d = 0.04;
+  y_correction += -sign_x * (yaw * k_yaw_p + yaw_rate * k_yaw_d);
+
+  y_correction = std::max(-0.10, std::min(0.10, y_correction));
+
+  double k_roll_p  = 0.15;
+  double k_pitch_p = 0.06;
+  double k_roll_d  = 0.08;
+  double k_pitch_d = 0.06;
+  // roll<0=left side down: FL(sign_y=+1) extends → sign_y*negative=negative ✓
+  // pitch<0=nose down:     FR(sign_x=+1) extends → +sign_x*negative=negative ✓
   double z_correction = sign_y * (roll * k_roll_p + roll_rate * k_roll_d)
-                      - sign_x * (pitch * k_pitch_p + pitch_rate * k_pitch_d);
-  z_correction = std::max(-0.03, std::min(0.03, z_correction));
+                      + sign_x * (pitch * k_pitch_p + pitch_rate * k_pitch_d);
+  z_correction = std::max(-0.05, std::min(0.05, z_correction));
 
   // === X轴: 前进速度修正 ===
   double x_correction = std::max(-0.03, std::min(0.03, vel[0] * 0.05));
@@ -138,28 +167,44 @@ static Eigen::Vector3d macroToVec(const double arr[3]) {
 }
 
 void TrotGait::stand() {
+  // 计算姿态补偿后的站立目标位置
+  // 当机体已倾斜时（如 Stop 命令到来时 roll 较大），使用与前进步态相同的
+  // 平衡修正量调整各脚落点，避免以固定坐标迈步导致倾倒加剧
+  auto adjustedTarget = [&](const double arr[3], int legID) -> Eigen::Vector3d {
+    Eigen::Vector3d tgt = macroToVec(arr);
+    Eigen::Vector3d adj = calculateBalanceAdjustment(robotModel, legID);
+    tgt[1] += adj[1];  // 横向(y)补偿：大roll/大横速时脚向倾斜侧偏移
+    tgt[2] += adj[2];  // 腿长(z)补偿：差动腿长抵抗倾斜
+    return tgt;
+  };
+
+  // Use STRAIGHT (ground-contact slide) to avoid airborne phase during stop transition.
+  // 300ms gives slower, more controlled repositioning when body still has momentum.
+  const int stand_duration = 300;
+
   switch (phase) {
     case 0:
-      if (legMovers[FL]->swingPhase || legMovers[RR]->swingPhase)
-        return;
-      if (!legMovers[FR]->swingPhase)
-        legMovers[FR]->moveLegPosition(FR_STAND, stance_duration, SWING, swingHeight, 0);
-      if (!legMovers[RL]->swingPhase)
-        legMovers[RL]->moveLegPosition(RL_STAND, stance_duration, SWING, swingHeight, 0);
-
+      {
+        const double fr_arr[] = FR_STAND;
+        const double rl_arr[] = RL_STAND;
+        if (!legMovers[FR]->straightPhase)
+          legMovers[FR]->moveLegPosition(adjustedTarget(fr_arr, FR), stand_duration, STRAIGHT, stanceDepth, 0);
+        if (!legMovers[RL]->straightPhase)
+          legMovers[RL]->moveLegPosition(adjustedTarget(rl_arr, RL), stand_duration, STRAIGHT, stanceDepth, 0);
+      }
       phase = 1;
       delay = DELAY_TIME;
-
       break;
 
     case 1:
-      if (legMovers[FR]->swingPhase || legMovers[RL]->swingPhase)
-        return;
-      if (!legMovers[FL]->swingPhase)
-        legMovers[FL]->moveLegPosition(FL_STAND, stance_duration, SWING, swingHeight, 0);
-      if (!legMovers[RR]->swingPhase)
-        legMovers[RR]->moveLegPosition(RR_STAND, stance_duration, SWING, swingHeight, 0);
-
+      {
+        const double fl_arr[] = FL_STAND;
+        const double rr_arr[] = RR_STAND;
+        if (!legMovers[FL]->straightPhase)
+          legMovers[FL]->moveLegPosition(adjustedTarget(fl_arr, FL), stand_duration, STRAIGHT, stanceDepth, 0);
+        if (!legMovers[RR]->straightPhase)
+          legMovers[RR]->moveLegPosition(adjustedTarget(rr_arr, RR), stand_duration, STRAIGHT, stanceDepth, 0);
+      }
       phase = 0;
       delay = DELAY_TIME;
       break;
@@ -205,7 +250,18 @@ void TrotGait::forward() {
   target_RR_Swing += adj_RR;
   target_RL_Swing += adj_RL;
 
-  // Stance Targets (只加 Z 轴姿态修正，保持 X/Y 轨迹稳定)
+  // Stance Targets: apply Z (attitude) + Y (roll capture point, no velocity term)
+  // Y correction on stance keeps support polygon under CoM when rolling
+  Eigen::Vector3d rpy_now = robotModel->getOrientation();
+  double roll_now = rpy_now[0];
+  double stance_y_adj = -roll_now * 0.15;  // same roll→y as in calculateBalanceAdjustment
+  stance_y_adj = std::max(-0.06, std::min(0.06, stance_y_adj));
+
+  target_FR_Stance[1] += stance_y_adj;
+  target_FL_Stance[1] += stance_y_adj;
+  target_RR_Stance[1] += stance_y_adj;
+  target_RL_Stance[1] += stance_y_adj;
+
   target_FR_Stance[2] += adj_FR[2];
   target_FL_Stance[2] += adj_FL[2];
   target_RR_Stance[2] += adj_RR[2];

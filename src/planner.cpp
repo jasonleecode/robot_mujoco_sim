@@ -17,7 +17,8 @@ SpotPlanner::SpotPlanner() : last_time_(0.0), mode_(control::BasicMotion::kDefau
   trot_gait_->stopGaitTimer();
 
   // 2. 初始化一些默认参数 (例如步态频率、高度等)
-  trot_gait_->setStanceDuration(250);
+  trot_gait_->setStanceDuration(150);
+  trot_gait_->setSwingHeight(0.06f);
 }
 
 SpotPlanner::~SpotPlanner() {
@@ -35,7 +36,9 @@ void SpotPlanner::reset() {
 void SpotPlanner::setMode(control::BasicMotion motion) {
   mode_ = motion;
 
-  is_fallen_ = false;
+  // 注意：不在此处重置 is_fallen_，跌倒状态只能通过 reset() 清除。
+  // 否则 main 循环检测到 mode 不匹配时会反复调用 setMode，导致警告日志刷屏。
+  if (is_fallen_) return;
 
   if (trot_gait_) {
     trot_gait_->active = true;
@@ -45,11 +48,13 @@ void SpotPlanner::setMode(control::BasicMotion motion) {
     case control::BasicMotion::kStand:
       trot_gait_->setGaitMotion(GaitMotion::STOP);
       break;
+    // The Spot model's thigh joint positive direction is opposite to the planner's
+    // Jacobian convention, so FORWARD/BACKWARD gait functions are swapped here.
     case control::BasicMotion::kForward:
-      trot_gait_->setGaitMotion(GaitMotion::FORWARD);
+      trot_gait_->setGaitMotion(GaitMotion::BACKWARD);
       break;
     case control::BasicMotion::kBackward:
-      trot_gait_->setGaitMotion(GaitMotion::BACKWARD);
+      trot_gait_->setGaitMotion(GaitMotion::FORWARD);
       break;
     case control::BasicMotion::kTurnLeft:
       trot_gait_->setGaitMotion(GaitMotion::LEFT);
@@ -77,7 +82,7 @@ void SpotPlanner::update(const RobotState& state) {
   // 诊断日志：每 100ms 打印一次完整姿态+步态状态
   // ===================================================================
   static double last_log_time = -1.0;
-  if (state.time - last_log_time >= 0.1) {
+  if (!is_fallen_ && state.time - last_log_time >= 0.1) {
     last_log_time = state.time;
 
     // --- 身体位姿 ---
@@ -188,7 +193,26 @@ void SpotPlanner::update(const RobotState& state) {
   // 0.5  = 倾斜 60度
   // 0.0  = 侧躺 (90度)
   // -1.0 = 肚子朝上 (180度)
-  const double FALL_THRESHOLD = 0.5;
+  const double FALL_THRESHOLD = 0.5;    // 60°: 判定摔倒，停止所有控制
+  const double TILT_THRESHOLD = 0.906;  // 25°: 预警阈值，强制切换到站立模式
+
+  // 中间倾斜预警：强制停止前进/后退/转向，切换为站立
+  if (z_projection < TILT_THRESHOLD && !is_fallen_) {
+    if (mode_ == control::BasicMotion::kForward  ||
+        mode_ == control::BasicMotion::kBackward ||
+        mode_ == control::BasicMotion::kTurnLeft ||
+        mode_ == control::BasicMotion::kTurnRight) {
+      static double last_tilt_warn_time = -1.0;
+      if (state.time - last_tilt_warn_time > 1.0) {
+        printf("[WARNING] Tilt pre-alarm (z_proj=%.3f < %.3f), switching to STAND\n",
+               z_projection, TILT_THRESHOLD);
+        fflush(stdout);
+        last_tilt_warn_time = state.time;
+      }
+      mode_ = control::BasicMotion::kStand;
+      trot_gait_->setGaitMotion(GaitMotion::STOP);
+    }
+  }
 
   if (z_projection < FALL_THRESHOLD) {
     if (!is_fallen_) {
@@ -218,6 +242,33 @@ void SpotPlanner::update(const RobotState& state) {
     trot_gait_->legMovers[i]->mover();
   }
   trot_gait_->runStep();
+
+  // 4. Continuous stance height correction (runs every control tick, 1kHz).
+  // During the stance (STRAIGHT) phase the leg tracks a fixed targPos. While the
+  // body tilts between phase transitions, we update that target's z component in
+  // real-time so the closed-loop straightMover continuously compensates roll.
+  {
+    double roll_cont, pitch_cont, yaw_cont;
+    toEulerAngle(state.imu_quat, roll_cont, pitch_cont, yaw_cont);
+    double roll_rate_cont = (state.qvel.size() > 3) ? state.qvel[3] : 0.0;
+
+    // sign convention: FR=0,RR=2 are right-side legs (sign_y=-1); FL=1,RL=3 left (sign_y=+1)
+    const int sign_y[4] = {-1, 1, -1, 1};
+    // Nominal target z for each leg (from planner macros via NOMINAL_HEIGHT=0.41)
+    const double nominal_z = -0.41;
+
+    const double k_cont_roll_p = 0.15;
+    const double k_cont_roll_d = 0.08;
+    for (int i = 0; i < 4; ++i) {
+      auto& lm = trot_gait_->legMovers[i];
+      if (lm->straightPhase > 0) {
+        // roll<0=left down: FL(sign_y=+1) extends → sign_y*negative=negative z ✓
+      double z_corr = sign_y[i] * (roll_cont * k_cont_roll_p + roll_rate_cont * k_cont_roll_d);
+        z_corr = std::max(-0.05, std::min(0.05, z_corr));
+        lm->setTargetZ(nominal_z + z_corr);
+      }
+    }
+  }
 }
 
 void SpotPlanner::getJointTargets(std::vector<double>& qref) {
@@ -226,8 +277,16 @@ void SpotPlanner::getJointTargets(std::vector<double>& qref) {
 }
 
 void SpotPlanner::setCurrentState(const RobotState& state) {
-  // 兼容接口，直接调用 map
   mapMujocoToPlanner(state);
+  // Sync qTarg to actual joint angles so the first gait step starts
+  // from the correct position instead of stale default angles.
+  for (int planner_idx = 0; planner_idx < 4; ++planner_idx) {
+    Eigen::Vector3d actual = planner_robot_.legs[planner_idx]->getAngles();
+    int offset = planner_idx * 3;
+    trot_gait_->qTarg[offset + 0] = actual[0];
+    trot_gait_->qTarg[offset + 1] = actual[1];
+    trot_gait_->qTarg[offset + 2] = actual[2];
+  }
 }
 
 // --- 辅助映射函数 ---

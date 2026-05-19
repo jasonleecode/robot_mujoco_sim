@@ -17,6 +17,7 @@
 
 #include "ControlActions.hpp"
 #include "planner.h"
+#include "robot_config.h"
 
 // IMU 数据结构
 struct IMUData {
@@ -77,6 +78,9 @@ class RobotSim {
   RobotSim(const std::string& xml_path);
   ~RobotSim();
 
+  // --- 机器人配置（构造后立即可用）-----------------------------------------
+  const RobotConfig& getConfig() const { return robot_config_; }
+
   // --- 物理与控制接口 ---
   void stepPhysics();
   void applyControlVector(const std::vector<double>& control);
@@ -110,6 +114,7 @@ class RobotSim {
   mjvPerturb pert;
 
   IMUData current_imu;  // 内部缓存
+  RobotConfig robot_config_;  // 构造时自动检测
   const int cam_w = 640;
   const int cam_h = 480;
   std::vector<unsigned char> cam_rgb_vec;

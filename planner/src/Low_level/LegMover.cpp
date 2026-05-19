@@ -32,28 +32,27 @@ void LegMover::straightMover()
     {
         countDown = 0;
         motionType = MOTION_TYPE_NUM;
-
-        Eigen::Vector3d curAngles = get_qTarg();
-        Eigen::Vector3d straightDirection_d = targPos - leg->getPosition();
-        curAngles = leg->getKinematics()->jointAngleCompute(curAngles, straightDirection_d);
-        set_qTarg(leg->enforceJointLim(curAngles));
-
         return;
     }
     if (countDown == 0)
     {
         countDown = waitTime;
     }
-        
     else
     {
         countDown--;
         return;
     }
-    
+
     straightPhase--;
     Eigen::Vector3d curAngles = get_qTarg();
-    curAngles = leg->getKinematics()->jointAngleCompute(curAngles, straightDirection_d);
+    // Recompute delta from current qTarg position toward target each step.
+    // This closes the loop and corrects accumulated IK error instead of
+    // replaying a fixed open-loop delta computed at motion start.
+    Eigen::Vector3d curPos = leg->getPosition(curAngles);
+    Eigen::Vector3d remaining = targPos - curPos;
+    Eigen::Vector3d delta = remaining / (straightPhase + 1);
+    curAngles = leg->getKinematics()->jointAngleCompute(curAngles, delta);
     set_qTarg(leg->enforceJointLim(curAngles));
 }
 
@@ -154,8 +153,10 @@ void LegMover::moveLegSwing(Eigen::Vector3d direction, float swingHeight, int du
     Eigen::VectorXd x(5);
     Eigen::VectorXd y(5);
 
-    Eigen::Vector3d curAngles = get_qTarg();
-    auto curPos = leg->getPosition(curAngles);
+    // Use actual joint angles and actual foot position so the swing spline
+    // starts from where the foot really is, not where qTarg thinks it is.
+    Eigen::Vector3d curAngles = leg->getAngles();
+    auto curPos = leg->getPosition();
 
     
     auto to_use_x = use_x ? curPos[0] : curPos[1];

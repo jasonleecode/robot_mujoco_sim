@@ -60,6 +60,7 @@ endif()
 # === 查找依赖 ===
 find_package(OpenGL REQUIRED)
 find_package(glfw3 REQUIRED)
+find_package(Eigen3 REQUIRED NO_MODULE)
 
 # CycloneDDS (仅在 USE_DDS 时查找)
 if(USE_DDS)
@@ -100,6 +101,8 @@ set(ROBOT_SIM_SOURCES
     src/RobotSim.cpp
     src/RobotSim.hpp
     src/planner.cpp
+    src/policy_controller.cpp
+    src/robot_config.cpp
 )
 if(USE_DDS)
   list(APPEND ROBOT_SIM_SOURCES src/dds_generated/ControlMsg.c)
@@ -134,6 +137,7 @@ target_link_libraries(RobotSim PRIVATE
     mujoco_simulate_lib
     ${ZMQ_LIBRARY}
     Threads::Threads
+    Eigen3::Eigen
 )
 
 if(USE_DDS)

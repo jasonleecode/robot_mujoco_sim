@@ -96,6 +96,10 @@ public:
      */
     void mover();
 
+    // Continuously update the z component of the target for closed-loop stance correction.
+    // Only has effect while straightPhase > 0 (stance motion is active).
+    void setTargetZ(double z) { if (straightPhase > 0) targPos[2] = z; }
+
 private:
     Leg *leg;                                /**< Pointer to the Leg object associated with this LegMover. */
     int phaseOffset = 0;                     /**< Offset for the motion phase. */

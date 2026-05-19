@@ -62,7 +62,10 @@ RobotSim::RobotSim(const std::string& xml_path) {
     m->geom_friction[geom_id * 3 + 0] = 1.0;
   }
 
-  // --- 3. 初始化 GLFW ---
+  // --- 3. 自动检测机器人配置（在模型加载后立即进行）---
+  robot_config_ = detectRobotConfig(m, xml_path);
+
+  // --- 4. 初始化 GLFW ---
   if (!glfwInit())
     throw std::runtime_error("GLFW Init Failed");
   glfwWindowHint(GLFW_SAMPLES, 4);
@@ -658,16 +661,56 @@ void RobotSim::updatePlotData(const std::vector<double>& qref) {
 void RobotSim::getIMUDataInternal(IMUData& data, const std::string& prefix) {
   if (!m || !d)
     return;
-  std::string name_quat = prefix + "quat";
-  int id_quat = mj_name2id(m, mjOBJ_SENSOR, name_quat.c_str());
+
+  // --- 四元数 --------------------------------------------------------------
+  const std::string name_quat = prefix + "quat";
+  const int id_quat = mj_name2id(m, mjOBJ_SENSOR, name_quat.c_str());
   if (id_quat != -1) {
-    int adr = m->sensor_adr[id_quat];
+    // 有硬件传感器：直接读 sensordata
+    const int adr = m->sensor_adr[id_quat];
     data.orientation[0] = d->sensordata[adr + 0];
     data.orientation[1] = d->sensordata[adr + 1];
     data.orientation[2] = d->sensordata[adr + 2];
     data.orientation[3] = d->sensordata[adr + 3];
+  } else {
+    // 降级回退：从 freejoint qpos[3..6] 读取机身四元数
+    // MuJoCo freejoint 布局: qpos = [x, y, z, qw, qx, qy, qz, ...]
+    if (m->nq >= 7) {
+      data.orientation[0] = d->qpos[3];  // w
+      data.orientation[1] = d->qpos[4];  // x
+      data.orientation[2] = d->qpos[5];  // y
+      data.orientation[3] = d->qpos[6];  // z
+    }
   }
-  // ... gyro, accel logic ...
+
+  // --- 陀螺仪（角速度）----------------------------------------------------
+  const std::string name_gyro = prefix + "gyro";
+  const int id_gyro = mj_name2id(m, mjOBJ_SENSOR, name_gyro.c_str());
+  if (id_gyro != -1) {
+    const int adr = m->sensor_adr[id_gyro];
+    data.gyro[0] = d->sensordata[adr + 0];
+    data.gyro[1] = d->sensordata[adr + 1];
+    data.gyro[2] = d->sensordata[adr + 2];
+  } else {
+    // 降级回退：从 freejoint qvel[3..5] 读取机身角速度
+    // MuJoCo freejoint 布局: qvel = [vx, vy, vz, wx, wy, wz, ...]
+    if (m->nv >= 6) {
+      data.gyro[0] = d->qvel[3];
+      data.gyro[1] = d->qvel[4];
+      data.gyro[2] = d->qvel[5];
+    }
+  }
+
+  // --- 加速度计（可选）----------------------------------------------------
+  const std::string name_acc = prefix + "acc";
+  const int id_acc = mj_name2id(m, mjOBJ_SENSOR, name_acc.c_str());
+  if (id_acc != -1) {
+    const int adr = m->sensor_adr[id_acc];
+    data.accel[0] = d->sensordata[adr + 0];
+    data.accel[1] = d->sensordata[adr + 1];
+    data.accel[2] = d->sensordata[adr + 2];
+  }
+  // 无加速度计时保持零值即可，当前框架不使用加速度计数据
 }
 
 void RobotSim::getIMUData(IMUData& data, const std::string& prefix) {

@@ -16,7 +16,7 @@
 
 #define REAR_OFFSET -0.00
 #define SWING_DISTANCE 0.1
-#define DELAY_TIME 100
+#define DELAY_TIME 20
 
 /* #define FR_FRONT {0.27, -0.14, -NOMINAL_HEIGHT}
 #define FR_BACK {0.07, -0.14, -NOMINAL_HEIGHT}

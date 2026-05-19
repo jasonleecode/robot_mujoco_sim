@@ -16,6 +16,7 @@
 #include "ControlActions.hpp"
 #include "RobotSim.hpp"
 #include "planner.h"
+#include "policy_controller.h"
 
 #ifdef USE_DDS
 #include <dds/dds.h>
@@ -35,6 +36,9 @@ struct SharedControlData {
 
   // 当前控制模式：true=使用Planner, false=使用DDS原始关节数据
   bool use_planner = true;
+
+  // 是否启用基于模型的策略控制器（替换规则步态）
+  bool use_policy_controller = false;
 
   // Planner 模式下的目标动作
   control::BasicMotion current_motion = control::BasicMotion::kStand;
@@ -196,9 +200,10 @@ int main(int argc, char** argv) {
       throw std::runtime_error("Model file not found: " + model_path);
     }
 
-    // 初始化 RobotSim
+    // 初始化 RobotSim（加载模型时自动检测 RobotConfig）
     RobotSim robot(model_path);
     const int num_actuators = robot.getNumActuators();
+    const RobotConfig& robot_cfg = robot.getConfig();
     std::cout << "Loaded model '" << model_path << "' with " << num_actuators << " actuators\n";
 
 #ifdef USE_DDS
@@ -231,12 +236,36 @@ int main(int argc, char** argv) {
         // 前进
         shared_data.current_motion = control::BasicMotion::kForward;
         std::cout << "Motion: Forward" << std::endl;
+      } else if (motion_type == 2) {
+        // 切换到基于模型的策略控制
+        shared_data.use_policy_controller = true;
+        std::cout << "Control mode: Policy (model-based)" << std::endl;
+      } else if (motion_type == 3) {
+        // 切换回规则步态控制
+        shared_data.use_policy_controller = false;
+        std::cout << "Control mode: Planner (rule-based)" << std::endl;
       }
     };
 
     // 注意：SpotPlanner 现在完全属于物理线程，不需要锁
+    // 仅当机器人支持规则步态时（当前仅 Spot）才使用 SpotPlanner
     SpotPlanner planner;
     planner.setControlFrequency(kSimulationDt);
+    if (!robot_cfg.supports_rule_gait) {
+      std::cout << "Note: Robot \"" << robot_cfg.name
+                << "\" does not support rule-based gait (SpotPlanner). "
+                   "Policy controller will be used.\n";
+    }
+
+    // 基于模型的策略控制器：适配当前机器人配置
+    PolicyController::Config policy_cfg;
+    policy_cfg.model_path   = "";      // TODO: 填入训练好的模型路径
+    policy_cfg.obs_dim      = 48;
+    policy_cfg.action_dim   = 12;
+    policy_cfg.control_dt   = 0.02;    // 50 Hz
+    policy_cfg.action_scale = 0.5;
+    PolicyController policy(policy_cfg);
+    policy.setRobotConfig(robot_cfg);  // 自动适配标称角和关节限位
 
 #ifdef USE_DDS
     bool warned_clamp = false;
@@ -251,6 +280,7 @@ int main(int argc, char** argv) {
       std::vector<double> control_target(num_actuators, 0.0);
 
       bool local_use_planner = true;
+      bool local_use_policy  = false;
       control::BasicMotion local_motion = control::BasicMotion::kStand;
       std::vector<double> local_raw_values(num_actuators, 0.0);
 
@@ -270,6 +300,7 @@ int main(int argc, char** argv) {
         {
           std::lock_guard<std::mutex> lock(shared_data.mutex);
           local_use_planner = shared_data.use_planner;
+          local_use_policy  = shared_data.use_policy_controller;
           local_motion = shared_data.current_motion;
           if (!local_use_planner) {
             local_raw_values = shared_data.raw_values;
@@ -291,8 +322,8 @@ int main(int argc, char** argv) {
         if (local_use_planner) {
           // === 阶段一：软启动归位 (Homing) ===
           if (!is_homing_complete) {
-            std::vector<double> stand_target;
-            planner.getJointTargets(stand_target);
+            // 使用从机器人配置自动检测的站立角度（兼容所有机型）
+            const std::vector<double>& stand_target = robot_cfg.stand_angles;
 
             double progress = current_sim_time / homing_duration;
 
@@ -315,17 +346,27 @@ int main(int argc, char** argv) {
               std::cout << "Motion Command Received. Activating Planner..." << std::endl;
               is_control_active = true;
               planner.setCurrentState(current_state);
+              policy.reset();
             }
 
             if (is_control_active) {
-              if (planner.mode() != local_motion) {
-                planner.setMode(local_motion);
+              if (local_use_policy || !robot_cfg.supports_rule_gait) {
+                // ===== 基于模型的策略控制 =====
+                if (policy.mode() != local_motion)
+                  policy.setMode(local_motion);
+                policy.update(current_state);
+                policy.getJointTargets(control_target);
+              } else {
+                // ===== 规则步态控制（SpotPlanner，仅 Spot 支持）=====
+                if (planner.mode() != local_motion)
+                  planner.setMode(local_motion);
+                planner.update(current_state);
+                planner.getJointTargets(control_target);
+                robot.updatePlotData(control_target);
               }
-              planner.update(current_state);
-              planner.getJointTargets(control_target);
-              robot.updatePlotData(control_target);
             } else {
-              planner.getJointTargets(control_target);
+              // 未激活时保持站立（使用配置中的标称角）
+              control_target = robot_cfg.stand_angles;
             }
           }
 
