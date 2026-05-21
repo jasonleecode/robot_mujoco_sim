@@ -98,15 +98,13 @@ Eigen::Matrix<double, 4, 4> Leg::calculateTransformation(double qhip,
 														 double qthigh,
 														 double qcalf)
 {
-	auto ret =  getBaseTransformation() *
-				hip.getTransformation(qhip) *
-				thigh.getTransformation(qthigh) *
-				calf.getTransformation(qcalf);
-	
-	/* std::cout << "Gets Here" << std::endl;
-	std::cout << qhip << " " << qthigh << " " << qcalf << std::endl;
-	std::cout << ret << std::endl; */
-	
+	// Use explicit Matrix4d (not auto) to force eager evaluation.
+	// auto would capture an Eigen expression-template with dangling references
+	// to temporaries from getTransformation(), causing silent wrong results.
+	Eigen::Matrix4d H = hip.getTransformation(qhip);
+	Eigen::Matrix4d T = thigh.getTransformation(qthigh);
+	Eigen::Matrix4d C = calf.getTransformation(qcalf);
+	Eigen::Matrix4d ret = getBaseTransformation() * H * T * C;
 	return ret;
 }
 

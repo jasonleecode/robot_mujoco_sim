@@ -51,6 +51,11 @@ void LegMover::straightMover()
     // replaying a fixed open-loop delta computed at motion start.
     Eigen::Vector3d curPos = leg->getPosition(curAngles);
     Eigen::Vector3d remaining = targPos - curPos;
+    // Cap step size to prevent divergence when joint limits create FK errors.
+    // Each step moves at most 4cm in any direction; normal steps are ~1mm.
+    const double kMaxStep = 0.04;
+    if (remaining.norm() > kMaxStep * (straightPhase + 1))
+        remaining = remaining.normalized() * kMaxStep * (straightPhase + 1);
     Eigen::Vector3d delta = remaining / (straightPhase + 1);
     curAngles = leg->getKinematics()->jointAngleCompute(curAngles, delta);
     set_qTarg(leg->enforceJointLim(curAngles));

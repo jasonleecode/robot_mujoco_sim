@@ -100,8 +100,8 @@ public:
     void setSwingHeight(float val);
 
 protected:
-    int stance_duration = 300;    /**< Duration of the stance phase in milliseconds. */
-    float swingHeight = 0.05;     /**< Height of the swing phase in meters. */
+    int stance_duration = 250;    /**< Duration of the stance phase in milliseconds. */
+    float swingHeight = 0.07;     /**< Height of the swing phase in meters. */
     float stanceDepth = -0.0;     /**< Depth of the stance phase in meters. */
     int phase = 0;                /**< Current phase of the gait cycle. */
     long long gaitStartTime = 0;  /**< Start time of the gait cycle. */

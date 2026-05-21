@@ -342,6 +342,7 @@ int main(int argc, char** argv) {
           }
           // === 阶段二：正常控制逻辑 ===
           else {
+            current_sim_time += kSimulationDt;
             if (!is_control_active && local_motion != control::BasicMotion::kStand) {
               std::cout << "Motion Command Received. Activating Planner..." << std::endl;
               is_control_active = true;

@@ -47,11 +47,11 @@
     -0.169182, -0.166028, -0.1, \
     -0.168096, 0.166349, -0.1
 
-#define STAND_POS_VALS                   \
-    0.22, -0.17, -NOMINAL_HEIGHT,        \
-    0.22,  0.17, -NOMINAL_HEIGHT,        \
-    -0.32, -0.17, -NOMINAL_HEIGHT,       \
-    -0.32,  0.17, -NOMINAL_HEIGHT
+#define STAND_POS_VALS                     \
+    0.250, -0.170, -NOMINAL_HEIGHT,        \
+    0.250,  0.170, -NOMINAL_HEIGHT,        \
+    -0.346, -0.170, -NOMINAL_HEIGHT,       \
+    -0.346,  0.170, -NOMINAL_HEIGHT
 /*
 #define FR_SIT {0.219434, -0.145806, -0.1}
 #define FL_SIT {0.219236, 0.145221, -0.1}
@@ -68,11 +68,11 @@
 #define RR_SIT {-0.169182, -0.166028, -0.0664779}
 #define RL_SIT {-0.168096, 0.166349, -0.0652987}
 
-// Spot 实测站立落脚位置（体坐标系，由 FK 日志标定）
-#define FR_STAND {0.22, -0.17, -NOMINAL_HEIGHT}
-#define FL_STAND {0.22,  0.17, -NOMINAL_HEIGHT}
-#define RR_STAND {-0.32, -0.17, -NOMINAL_HEIGHT}
-#define RL_STAND {-0.32,  0.17, -NOMINAL_HEIGHT}
+// Spot 实测站立落脚位置（体坐标系，由 FK 日志标定：前腿 x=0.250，后腿 x=-0.346）
+#define FR_STAND {0.250, -0.170, -NOMINAL_HEIGHT}
+#define FL_STAND {0.250,  0.170, -NOMINAL_HEIGHT}
+#define RR_STAND {-0.346, -0.170, -NOMINAL_HEIGHT}
+#define RL_STAND {-0.346,  0.170, -NOMINAL_HEIGHT}
 
 #define STAND_SIT_DURATION 1000
 

@@ -130,28 +130,25 @@ static Eigen::Vector3d calculateBalanceAdjustment(Robot* robot, int legID) {
 
   // === Y轴（横向）: Raibert capture point + yaw阻尼 ===
   // bpos[1] 是世界坐标系 Y，不能加到体坐标系落脚目标上，已移除该项
-  double k_vy  = 0.18;
+  double k_vy  = 0.08;
   double y_correction = vel[1] * k_vy;
 
   // Roll capture point: shift all feet toward falling side (roll<0=left down → +y)
-  double k_roll_lat = 0.15;
+  double k_roll_lat = 0.12;
   y_correction += -roll * k_roll_lat;
 
-  // Yaw damping — keep gains low to avoid yaw oscillation
-  double k_yaw_p = 0.04;
-  double k_yaw_d = 0.04;
-  y_correction += -sign_x * (yaw * k_yaw_p + yaw_rate * k_yaw_d);
+  // Yaw: empirically the original sign caused CW drift to amplify; keep zero
+  // until the forward/heading coupling is properly characterized.
 
   y_correction = std::max(-0.10, std::min(0.10, y_correction));
 
   double k_roll_p  = 0.15;
-  double k_pitch_p = 0.06;
-  double k_roll_d  = 0.08;
-  double k_pitch_d = 0.06;
-  // roll<0=left side down: FL(sign_y=+1) extends → sign_y*negative=negative ✓
-  // pitch<0=nose down:     FR(sign_x=+1) extends → +sign_x*negative=negative ✓
-  double z_correction = sign_y * (roll * k_roll_p + roll_rate * k_roll_d)
-                      + sign_x * (pitch * k_pitch_p + pitch_rate * k_pitch_d);
+  double k_pitch_p = 0.15;
+  // pitch>0=nose-down (front lower in body frame), -sign_x corrects:
+  //   positive pitch (nose-down) → negative z_adj on front → longer front leg → front higher ✓
+  //   positive pitch (nose-down) → positive z_adj on rear → shorter rear leg → rear lower ✓
+  double z_correction = sign_y * (roll * k_roll_p)
+                      - sign_x * (pitch * k_pitch_p);
   z_correction = std::max(-0.05, std::min(0.05, z_correction));
 
   // === X轴: 前进速度修正 ===
@@ -253,8 +250,9 @@ void TrotGait::forward() {
   // Stance Targets: apply Z (attitude) + Y (roll capture point, no velocity term)
   // Y correction on stance keeps support polygon under CoM when rolling
   Eigen::Vector3d rpy_now = robotModel->getOrientation();
-  double roll_now = rpy_now[0];
-  double stance_y_adj = -roll_now * 0.15;  // same roll→y as in calculateBalanceAdjustment
+  double roll_now  = rpy_now[0];
+  double pitch_now = rpy_now[1];
+  double stance_y_adj = -roll_now * 0.15;
   stance_y_adj = std::max(-0.06, std::min(0.06, stance_y_adj));
 
   target_FR_Stance[1] += stance_y_adj;
@@ -262,36 +260,10 @@ void TrotGait::forward() {
   target_RR_Stance[1] += stance_y_adj;
   target_RL_Stance[1] += stance_y_adj;
 
-  target_FR_Stance[2] += adj_FR[2];
-  target_FL_Stance[2] += adj_FL[2];
-  target_RR_Stance[2] += adj_RR[2];
-  target_RL_Stance[2] += adj_RL[2];
-
-  // --- 4. 执行状态机 ---
-  // 打印本次落脚目标及平衡修正量
-  {
-    Eigen::Vector3d rpy = robotModel->getOrientation();
-    Eigen::Vector3d vel = robotModel->getLinearVelocity();
-    printf("[FORWARD ph=%d] rpy=(%.1f,%.1f,%.1f)deg  vel=(%.3f,%.3f)\n"
-           "  adj: FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
-           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n"
-           "  swing_tgt: FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
-           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n"
-           "  stance_tgt:FR=(%.3f,%.3f,%.3f) FL=(%.3f,%.3f,%.3f)"
-           " RR=(%.3f,%.3f,%.3f) RL=(%.3f,%.3f,%.3f)\n",
-           phase, rpy[0]*57.3, rpy[1]*57.3, rpy[2]*57.3, vel[0], vel[1],
-           adj_FR[0],adj_FR[1],adj_FR[2], adj_FL[0],adj_FL[1],adj_FL[2],
-           adj_RR[0],adj_RR[1],adj_RR[2], adj_RL[0],adj_RL[1],adj_RL[2],
-           target_FR_Swing[0],target_FR_Swing[1],target_FR_Swing[2],
-           target_FL_Swing[0],target_FL_Swing[1],target_FL_Swing[2],
-           target_RR_Swing[0],target_RR_Swing[1],target_RR_Swing[2],
-           target_RL_Swing[0],target_RL_Swing[1],target_RL_Swing[2],
-           target_FR_Stance[0],target_FR_Stance[1],target_FR_Stance[2],
-           target_FL_Stance[0],target_FL_Stance[1],target_FL_Stance[2],
-           target_RR_Stance[0],target_RR_Stance[1],target_RR_Stance[2],
-           target_RL_Stance[0],target_RL_Stance[1],target_RL_Stance[2]);
-    fflush(stdout);
-  }
+  target_FR_Stance[2] = robotModel->legs[FR]->getPosition()[2];
+  target_FL_Stance[2] = robotModel->legs[FL]->getPosition()[2];
+  target_RR_Stance[2] = robotModel->legs[RR]->getPosition()[2];
+  target_RL_Stance[2] = robotModel->legs[RL]->getPosition()[2];
 
   switch (phase) {
     case 0:

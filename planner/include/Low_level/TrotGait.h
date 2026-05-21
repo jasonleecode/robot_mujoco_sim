@@ -14,7 +14,7 @@
 
 #include <unsupported/Eigen/Splines>
 
-#define REAR_OFFSET -0.00
+#define REAR_OFFSET -0.02
 #define SWING_DISTANCE 0.1
 #define DELAY_TIME 20
 
@@ -56,18 +56,19 @@
 // 落脚目标以 FK 实测站立位为中心（前腿 x=0.22，后腿 x=-0.32，y=±0.17）
 // 步长 0.10m（每腿前后各 ±0.05m），保守设置便于调试
 
-// --- 前进步态落脚目标（body frame，Spot 实测） ---
-#define FR_FRONT {0.27, -0.17, -NOMINAL_HEIGHT}
-#define FR_BACK  {0.17, -0.17, -NOMINAL_HEIGHT}
+// --- 前进步态落脚目标（body frame，以 FK 实测站立位为中心，步长 150mm）---
+// 前腿 FK 实测 x=0.250，后腿 x=-0.346，各 ±0.075m 对称分布
+#define FR_FRONT {0.325, -0.170, -NOMINAL_HEIGHT}
+#define FR_BACK  {0.175, -0.170, -NOMINAL_HEIGHT}
 
-#define FL_FRONT {0.27,  0.17, -NOMINAL_HEIGHT}
-#define FL_BACK  {0.17,  0.17, -NOMINAL_HEIGHT}
+#define FL_FRONT {0.325,  0.170, -NOMINAL_HEIGHT}
+#define FL_BACK  {0.175,  0.170, -NOMINAL_HEIGHT}
 
-#define RR_FRONT {-0.27, -0.17, -NOMINAL_HEIGHT + REAR_OFFSET}
-#define RR_BACK  {-0.37, -0.17, -NOMINAL_HEIGHT + REAR_OFFSET}
+#define RR_FRONT {-0.271, -0.170, -NOMINAL_HEIGHT + REAR_OFFSET}
+#define RR_BACK  {-0.421, -0.170, -NOMINAL_HEIGHT + REAR_OFFSET}
 
-#define RL_FRONT {-0.27,  0.17, -NOMINAL_HEIGHT + REAR_OFFSET}
-#define RL_BACK  {-0.37,  0.17, -NOMINAL_HEIGHT + REAR_OFFSET}
+#define RL_FRONT {-0.271,  0.170, -NOMINAL_HEIGHT + REAR_OFFSET}
+#define RL_BACK  {-0.421,  0.170, -NOMINAL_HEIGHT + REAR_OFFSET}
 
 // --- 横移步态落脚目标（横向 ±0.06m） ---
 #define FR_SIDE_RIGHT {0.22, -0.23, -NOMINAL_HEIGHT}

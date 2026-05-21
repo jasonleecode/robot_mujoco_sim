@@ -149,3 +149,37 @@ if(BUILD_MUJOCO_SAMPLES)
 endif()
 
 add_subdirectory(tools)
+
+# === Headless planner test (no GLFW/MuJoCo required) ===
+add_executable(PlannerTest
+    src/planner_test.cpp
+    src/planner.cpp
+)
+target_include_directories(PlannerTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(PlannerTest PRIVATE
+    planner
+    Eigen3::Eigen
+    Threads::Threads
+)
+target_compile_definitions(PlannerTest PRIVATE PLANNER_TEST_HEADLESS=1)
+
+# === Headless MuJoCo physics simulation (no GLFW window) ===
+add_executable(HeadlessSim
+    src/headless_sim.cpp
+    src/planner.cpp
+    src/robot_config.cpp
+)
+target_include_directories(HeadlessSim PRIVATE
+    "${MUJOCO_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    ${ZMQ_INCLUDE_DIRS}
+)
+target_link_libraries(HeadlessSim PRIVATE
+    ${MUJOCO_LIBRARY}
+    planner
+    Eigen3::Eigen
+    Threads::Threads
+    ${ZMQ_LIBRARY}
+)

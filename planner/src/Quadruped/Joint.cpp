@@ -61,21 +61,25 @@ void Joint::setAngle(double angle)  {
 
 double Joint::enforceLim(double estJointAngle)
 {
+	if (!std::isfinite(estJointAngle)) {
+		estJointAngle = defaultAngle;
+		return estJointAngle;
+	}
 	if (estJointAngle < jointLoLim)
 	{
 		std::cout << "Low limit Triggered " << estJointAngle << " (clamped to " << jointLoLim << ")" << std::endl;
 		estJointAngle = jointLoLim;
 	}
-		
+
 	else if (estJointAngle > jointUpLim)
 	{
 		std::cout << "Uplimit Triggered " << estJointAngle << " (clamped to " << jointUpLim << ")" << std::endl;
 		estJointAngle = jointUpLim;
 	}
-	return estJointAngle;	
+	return estJointAngle;
 }
 
-Eigen::Matrix<double, 4, 4> Joint::calculateHipTransformation(double angle) {
+Eigen::Matrix<double, 4, 4> Joint::calculateHipTransformation(double angle) const {
 
 	Eigen::Matrix<double, 4, 4> jointTransformation;
 
@@ -86,7 +90,7 @@ Eigen::Matrix<double, 4, 4> Joint::calculateHipTransformation(double angle) {
 	return jointTransformation;
 }
 
-Eigen::Matrix<double, 4, 4> Joint::calculateThighTransformation(double angle) {
+Eigen::Matrix<double, 4, 4> Joint::calculateThighTransformation(double angle) const {
 
 	Eigen::Matrix<double, 4, 4> jointTransformation;
 
@@ -102,7 +106,7 @@ Eigen::Matrix<double, 4, 4> Joint::calculateThighTransformation(double angle) {
 }
 
 
-Eigen::Matrix<double, 4, 4> Joint::calculateCalfTransformation(double angle) {
+Eigen::Matrix<double, 4, 4> Joint::calculateCalfTransformation(double angle) const {
 
 	Eigen::Matrix<double, 4, 4> jointTransformation;
 
@@ -124,8 +128,14 @@ const Eigen::Matrix4d& Joint::getTransformation() const {
 }
 
 const Eigen::Matrix4d Joint::getTransformation(double angle) const {
-
-    return calculateTransformation(angle);
+    // Bypass the lambda (which captures this at construction and becomes stale
+    // if the Joint is ever moved/copied). Use direct dispatch instead.
+    switch (type) {
+        case HIP:   return calculateHipTransformation(angle);
+        case THIGH: return calculateThighTransformation(angle);
+        case CALF:  return calculateCalfTransformation(angle);
+        default:    return Eigen::Matrix4d::Identity();
+    }
 }
 
 

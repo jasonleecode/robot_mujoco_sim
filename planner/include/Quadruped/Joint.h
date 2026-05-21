@@ -176,20 +176,20 @@ private:
      * @param angle The angle of the hip joint.
      * @return The transformation matrix for the given angle.
      */
-    Eigen::Matrix<double, 4, 4> calculateHipTransformation(double angle);
+    Eigen::Matrix<double, 4, 4> calculateHipTransformation(double angle) const;
     /**
      * @brief Calculate the transformation matrix for the thigh joint.
      * @param angle The angle of the thigh joint.
      * @return The transformation matrix for the given angle.
      */
-    Eigen::Matrix<double, 4, 4> calculateThighTransformation(double angle);
+    Eigen::Matrix<double, 4, 4> calculateThighTransformation(double angle) const;
 
     /**
      * @brief Calculate the transformation matrix for the calf joint.
      * @param angle The angle of the calf joint.
      * @return The transformation matrix for the given angle.
      */
-    Eigen::Matrix<double, 4, 4> calculateCalfTransformation(double angle);
+    Eigen::Matrix<double, 4, 4> calculateCalfTransformation(double angle) const;
 };
 
 #endif // JOINT_H
