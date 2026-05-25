@@ -56,6 +56,15 @@ RobotSim::RobotSim(const std::string& xml_path) {
     throw std::runtime_error(error);
   d = mj_makeData(m);
 
+  // 若模型有 "home" 关键帧，直接从站立姿态启动，避免从零角度跌落
+  {
+    const int key_id = mj_name2id(m, mjOBJ_KEY, "home");
+    if (key_id >= 0) {
+      mj_resetDataKeyframe(m, d, key_id);
+      mj_forward(m, d);  // 更新所有派生量（碰撞、传感器等）
+    }
+  }
+
   // 修改地面摩擦力
   int geom_id = mj_name2id(m, mjOBJ_GEOM, "floor");
   if (geom_id != -1) {
@@ -582,16 +591,17 @@ void RobotSim::handle_mouse_move(double xpos, double ypos) {
 
   int height = fb_h;
 
-  bool mod_shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
-  mjtMouse action;
-  if (button_right)
-    action = mod_shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
-  else if (button_left)
-    action = mod_shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
-  else
-    action = mjMOUSE_ZOOM;
-
-  mjv_moveCamera(m, action, dx / height, dy / height, &scn, &cam);
+  if (button_left) {
+    // 自由旋转：H 用 dx，V 用 dy，两轴同时响应
+    mjv_moveCamera(m, mjMOUSE_ROTATE_H, dx / height, 0,            &scn, &cam);
+    mjv_moveCamera(m, mjMOUSE_ROTATE_V, 0,           dy / height, &scn, &cam);
+  } else if (button_right) {
+    // 平移：H 用 dx，V 用 dy
+    mjv_moveCamera(m, mjMOUSE_MOVE_H, dx / height, 0,            &scn, &cam);
+    mjv_moveCamera(m, mjMOUSE_MOVE_V, 0,           dy / height, &scn, &cam);
+  } else if (button_middle) {
+    mjv_moveCamera(m, mjMOUSE_ZOOM, 0, dy / height, &scn, &cam);
+  }
 }
 
 void RobotSim::handle_scroll(double xoffset, double yoffset) {

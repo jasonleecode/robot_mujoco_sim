@@ -108,6 +108,25 @@ RobotConfig detectRobotConfig(const mjModel* m, const std::string& xml_path) {
   // --- 关节限位 -------------------------------------------------------------
   readJointLimits(m, m->nu, cfg.joint_limits_low, cfg.joint_limits_high);
 
+  // --- 驱动器类型检测 -------------------------------------------------------
+  // 检查第一个驱动器是否为 position 类型
+  if (m->nu > 0) {
+    cfg.uses_position_ctrl = (m->actuator_gaintype[0] == mjGAIN_FIXED &&
+                               m->actuator_biastype[0] == mjBIAS_AFFINE);
+    // 更简单：检查 bias 系数，position actuator 的 biasprm[1] = -kp
+    // motor 的 biastype = mjBIAS_NONE
+    cfg.uses_position_ctrl = (m->actuator_biastype[0] != mjBIAS_NONE);
+  }
+
+  // Go1/Go2 (motor 驱动) 使用与 MJX 训练模型匹配的 PD 增益
+  // scene_mjx.xml: gainprm="50 0 0" biasprm="0 -50 -0.5" → kp=50, kd=0.5
+  if (!cfg.uses_position_ctrl) {
+    if (cfg.name == "go1" || cfg.name == "go2") {
+      cfg.pd_kp = 50.0;
+      cfg.pd_kd =  0.5;
+    }
+  }
+
   // --- 能力标志 -------------------------------------------------------------
   // SpotPlanner 仅适用于 Spot：通过 "imu_quat" 传感器存在或名称判断
   cfg.supports_rule_gait = (cfg.name == "spot") || cfg.has_hardware_imu;
@@ -116,9 +135,9 @@ RobotConfig detectRobotConfig(const mjModel* m, const std::string& xml_path) {
   std::cout << "[RobotConfig] Detected robot: \"" << cfg.name << "\"\n"
             << "  actuators=" << cfg.num_actuators
             << "  stand_height=" << cfg.stand_height << "m\n"
+            << "  ctrl_type=" << (cfg.uses_position_ctrl ? "position" : "motor(PD)")
+            << "  pd_kp=" << cfg.pd_kp << "  pd_kd=" << cfg.pd_kd << "\n"
             << "  imu_quat_sensor=\"" << cfg.imu_quat_sensor << "\""
-            << "  imu_gyro_sensor=\"" << cfg.imu_gyro_sensor << "\"\n"
-            << "  has_hardware_imu=" << cfg.has_hardware_imu
             << "  supports_rule_gait=" << cfg.supports_rule_gait << "\n";
 
   if (!cfg.stand_angles.empty()) {

@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
+constexpr char kDefaultModel[] = "robot/unitree_go2/scene.xml";
 // 物理循环频率：1000Hz (1ms)
 constexpr double kSimulationDt = 0.001;
 constexpr int kControlMsgSlots = 16;
@@ -259,13 +259,41 @@ int main(int argc, char** argv) {
 
     // 基于模型的策略控制器：适配当前机器人配置
     PolicyController::Config policy_cfg;
-    policy_cfg.model_path   = "";      // TODO: 填入训练好的模型路径
-    policy_cfg.obs_dim      = 48;
+    policy_cfg.obs_dim      = 52;
     policy_cfg.action_dim   = 12;
     policy_cfg.control_dt   = 0.02;    // 50 Hz
-    policy_cfg.action_scale = 0.5;
+    policy_cfg.action_scale = 0.25;
+    // 按优先级搜索模型文件：
+    //   1. 机器人专属模型  actor_<name>.pt  (e.g. actor_go2.pt, actor_spot.pt)
+    //   2. 通用回退       actor_300.pt
+    // 两个基准目录都检查：运行目录 和 ../（从 build/ 运行时）
+    for (const std::string& base : {"models/legged_gym", "../models/legged_gym"}) {
+      // 先找机器人专属
+      const std::string specific = base + "/actor_" + robot_cfg.name + ".pt";
+      if (std::filesystem::exists(specific)) {
+        policy_cfg.model_path = specific;
+        break;
+      }
+      // 再找通用回退
+      const std::string fallback = base + "/actor_300.pt";
+      if (std::filesystem::exists(fallback)) {
+        policy_cfg.model_path = fallback;
+        break;
+      }
+    }
+    if (policy_cfg.model_path.empty()) {
+      std::cout << "[Policy] No model file found. Running in stub mode (nominal stance).\n";
+    } else {
+      std::cout << "[Policy] Using model: " << policy_cfg.model_path << "\n";
+    }
     PolicyController policy(policy_cfg);
     policy.setRobotConfig(robot_cfg);  // 自动适配标称角和关节限位
+#ifdef USE_TORCH
+    // 注入 LibTorch 后端（编译时通过 -DUSE_TORCH=ON 启用）
+    policy.setBackend(std::make_unique<TorchBackend>());
+    if (!policy_cfg.model_path.empty())
+      policy.loadModel(policy_cfg.model_path);
+#endif
 
 #ifdef USE_DDS
     bool warned_clamp = false;
@@ -278,6 +306,8 @@ int main(int argc, char** argv) {
       // 本地缓存，减少锁竞争和内存分配
       RobotState current_state;
       std::vector<double> control_target(num_actuators, 0.0);
+      // motor 驱动器时，control_target 存位置目标，需转换为力矩
+      std::vector<double> torque_cmd(num_actuators, 0.0);
 
       bool local_use_planner = true;
       bool local_use_policy  = false;
@@ -285,9 +315,9 @@ int main(int argc, char** argv) {
       std::vector<double> local_raw_values(num_actuators, 0.0);
 
       bool is_control_active = false;
-      // 归位相关变量
+      // 归位相关变量：从 home keyframe 启动时仅需很短的稳定时间
       bool is_homing_complete = false;
-      double homing_duration = 2.0;
+      const double homing_duration = robot_cfg.supports_rule_gait ? 2.0 : 0.5;
       double current_sim_time = 0.0;
       std::vector<double> spawn_qpos;
 
@@ -343,8 +373,11 @@ int main(int argc, char** argv) {
           // === 阶段二：正常控制逻辑 ===
           else {
             current_sim_time += kSimulationDt;
-            if (!is_control_active && local_motion != control::BasicMotion::kStand) {
-              std::cout << "Motion Command Received. Activating Planner..." << std::endl;
+            // 对于不支持规则步态的机器人（如 Go2），归位完成后立即激活策略控制器
+            if (!is_control_active &&
+                (local_motion != control::BasicMotion::kStand ||
+                 !robot_cfg.supports_rule_gait)) {
+              std::cout << "Activating controller..." << std::endl;
               is_control_active = true;
               planner.setCurrentState(current_state);
               policy.reset();
@@ -377,7 +410,21 @@ int main(int argc, char** argv) {
         }
 
         // 4. 应用控制并执行物理步进
-        robot.applyControlVector(control_target);
+        // motor 驱动器（Go1/Go2）：control_target 是位置目标，需 PD 转换为力矩
+        if (!robot_cfg.uses_position_ctrl) {
+          const double kp = robot_cfg.pd_kp;
+          const double kd = robot_cfg.pd_kd;
+          for (int i = 0; i < num_actuators; ++i) {
+            const double q   = (current_state.qpos.size() > static_cast<size_t>(7 + i))
+                               ? current_state.qpos[7 + i] : 0.0;
+            const double dq  = (current_state.qvel.size() > static_cast<size_t>(6 + i))
+                               ? current_state.qvel[6 + i] : 0.0;
+            torque_cmd[i] = kp * (control_target[i] - q) + kd * (0.0 - dq);
+          }
+          robot.applyControlVector(torque_cmd);
+        } else {
+          robot.applyControlVector(control_target);
+        }
         robot.stepPhysics();
 
         // === 诊断：每 500ms 打印一次物理层身体状态 ===

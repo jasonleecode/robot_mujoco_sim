@@ -15,6 +15,9 @@ else()
   option(USE_DDS "Enable CycloneDDS control interface" OFF)
 endif()
 
+# LibTorch 选项：启用基于模型的策略控制器推理
+option(USE_TORCH "Enable LibTorch policy inference backend" OFF)
+
 # === MuJoCo 路径设置 (平台自适应) ===
 if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
@@ -90,6 +93,29 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 find_library(ZMQ_LIBRARY zmq HINTS ${ZMQ_LIBRARY_DIRS})
 
+# LibTorch (optional)
+if(USE_TORCH)
+  # 优先从 Python 环境自动定位 LibTorch cmake 前缀
+  # 手动指定时（-DTorch_DIR 或 CMake 缓存中已有 Torch_DIR）跳过自动探测
+  if(NOT Torch_DIR AND NOT DEFINED CACHE{Torch_DIR})
+    execute_process(
+      COMMAND python3 -c "import torch; print(torch.utils.cmake_prefix_path)"
+      OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(TORCH_CMAKE_PREFIX)
+      list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")
+      message(STATUS "LibTorch cmake prefix (from Python): ${TORCH_CMAKE_PREFIX}")
+    endif()
+  else()
+    message(STATUS "LibTorch: using manually specified Torch_DIR=${Torch_DIR}")
+  endif()
+  find_package(Torch REQUIRED)
+  message(STATUS "LibTorch found: ${TORCH_VERSION}")
+  add_definitions(-DUSE_TORCH)
+endif()
+
 # === 添加子模块 ===
 add_subdirectory(planner)
 add_subdirectory(simulate)
@@ -142,6 +168,12 @@ target_link_libraries(RobotSim PRIVATE
 
 if(USE_DDS)
   target_link_libraries(RobotSim PRIVATE CycloneDDS::ddsc)
+endif()
+
+if(USE_TORCH)
+  target_link_libraries(RobotSim PRIVATE ${TORCH_LIBRARIES})
+  # LibTorch requires C++14 at minimum; our project is already C++17
+  set_property(TARGET RobotSim PROPERTY CXX_STANDARD 17)
 endif()
 
 if(BUILD_MUJOCO_SAMPLES)

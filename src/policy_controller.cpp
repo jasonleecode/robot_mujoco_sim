@@ -145,59 +145,70 @@ void PolicyController::setMode(control::BasicMotion motion) {
       break;
     case control::BasicMotion::kStand:
     default:
-      setCommand(0.0, 0.0, 0.0);
+      // Policy was trained with vx ∈ (0.3, 1.5); cmd=0 is out-of-distribution.
+      // Use minimum training velocity to keep behaviour stable.
+      setCommand(0.3, 0.0, 0.0);
       break;
   }
 }
 
 // =========================================================================
-// 重力投影辅助函数
-//
-// 将世界坐标系重力方向 [0, 0, -1] 旋转到 body frame。
-// 公式推导（body-from-world 旋转 q = [w, x, y, z]）：
-//   g_body = q^{-1} ⊗ [0,0,-1] ⊗ q
-// 化简后直接结果：
-//   gx = 2(wy - xz)
-//   gy = -2(wx + yz)
-//   gz = -(1 - 2x² - 2y²)
-// 验证：q=[1,0,0,0] 时 g_body=[0,0,-1] ✓（直立时重力朝 -z）
+// 将世界坐标系向量旋转到机体坐标系
+// MuJoCo freejoint q=[w,x,y,z] 表示机体相对世界的朝向（body-from-world）
+// v_body = R(q)^T * v_world，等价于用 q^{-1}=[w,-x,-y,-z] 旋转
+// 旋转矩阵展开：
+//   vb_x = (1-2y²-2z²)*vx + 2(xy+wz)*vy + 2(xz-wy)*vz
+//   vb_y = 2(xy-wz)*vx  + (1-2x²-2z²)*vy + 2(yz+wx)*vz
+//   vb_z = 2(xz+wy)*vx  + 2(yz-wx)*vy  + (1-2x²-2y²)*vz
+// 验证：q=[1,0,0,0] 时 v_body=v_world ✓
 // =========================================================================
-Eigen::Vector3f PolicyController::projectedGravity(const std::vector<double>& q) {
+static Eigen::Vector3f worldToBody(const std::vector<double>& q,
+                                   double vx, double vy, double vz) {
   const double w = q[0], x = q[1], y = q[2], z = q[3];
   return Eigen::Vector3f(
-      static_cast<float>( 2.0 * (w*y - x*z)),
-      static_cast<float>(-2.0 * (w*x + y*z)),
-      static_cast<float>(-(1.0 - 2.0*(x*x + y*y)))
+    static_cast<float>((1-2*y*y-2*z*z)*vx + 2*(x*y+w*z)*vy  + 2*(x*z-w*y)*vz),
+    static_cast<float>(2*(x*y-w*z)*vx   + (1-2*x*x-2*z*z)*vy + 2*(y*z+w*x)*vz),
+    static_cast<float>(2*(x*z+w*y)*vx   + 2*(y*z-w*x)*vy  + (1-2*x*x-2*y*y)*vz)
   );
 }
 
 // =========================================================================
-// 观测向量构建（48 维）
+// 重力投影辅助函数
+// g_body = worldToBody(q, 0, 0, -1)，直立时结果为 [0,0,-1] ✓
+// =========================================================================
+Eigen::Vector3f PolicyController::projectedGravity(const std::vector<double>& q) {
+  return worldToBody(q, 0.0, 0.0, -1.0);
+}
+
+// =========================================================================
+// 观测向量构建（52 维：48 dim Isaac Lab standard + 4 dim gait clock）
 // =========================================================================
 Eigen::VectorXf PolicyController::buildObservation(const RobotState& state) const {
   Eigen::VectorXf obs(cfg_.obs_dim);
   int idx = 0;
 
-  // ---- [0-2] body 线速度（body frame）------------------------------------
-  // MuJoCo qvel[0-2] = 世界坐标系线速度，通过 yaw 旋转到机身坐标系
+  // ---- [0-2] body 线速度（世界→机体完整旋转，乘以 scale_lin_vel）----------
   const double vx_w = (state.qvel.size() > 0) ? state.qvel[0] : 0.0;
   const double vy_w = (state.qvel.size() > 1) ? state.qvel[1] : 0.0;
   const double vz_w = (state.qvel.size() > 2) ? state.qvel[2] : 0.0;
+  const Eigen::Vector3f lin_vel_b = worldToBody(state.imu_quat, vx_w, vy_w, vz_w);
 
-  const double qw = state.imu_quat[0], qx = state.imu_quat[1];
-  const double qy = state.imu_quat[2], qz_q = state.imu_quat[3];
-  const double yaw = std::atan2(2.0*(qw*qz_q + qx*qy),
-                                1.0 - 2.0*(qy*qy + qz_q*qz_q));
-  const double cy = std::cos(yaw), sy = std::sin(yaw);
+  const float sv = static_cast<float>(cfg_.scale_lin_vel);
+  obs[idx++] = sv * lin_vel_b[0];
+  obs[idx++] = sv * lin_vel_b[1];
+  obs[idx++] = sv * lin_vel_b[2];
 
-  obs[idx++] = static_cast<float>( cy*vx_w + sy*vy_w);   // vx_body
-  obs[idx++] = static_cast<float>(-sy*vx_w + cy*vy_w);   // vy_body
-  obs[idx++] = static_cast<float>(vz_w);                  // vz_body
+  // ---- [3-5] body 角速度（MuJoCo qvel[3-5] 为世界系，旋转到机体系）--------
+  // legged_gym 训练时用的是 base_ang_vel（机体系），需保持一致
+  const double wx_w = (state.qvel.size() > 3) ? state.qvel[3] : 0.0;
+  const double wy_w = (state.qvel.size() > 4) ? state.qvel[4] : 0.0;
+  const double wz_w = (state.qvel.size() > 5) ? state.qvel[5] : 0.0;
+  const Eigen::Vector3f ang_vel_b = worldToBody(state.imu_quat, wx_w, wy_w, wz_w);
 
-  // ---- [3-5] body 角速度（body frame ≈ MuJoCo qvel[3-5]）----------------
-  obs[idx++] = (state.qvel.size() > 3) ? static_cast<float>(state.qvel[3]) : 0.0f;
-  obs[idx++] = (state.qvel.size() > 4) ? static_cast<float>(state.qvel[4]) : 0.0f;
-  obs[idx++] = (state.qvel.size() > 5) ? static_cast<float>(state.qvel[5]) : 0.0f;
+  const float sw = static_cast<float>(cfg_.scale_ang_vel);
+  obs[idx++] = sw * ang_vel_b[0];
+  obs[idx++] = sw * ang_vel_b[1];
+  obs[idx++] = sw * ang_vel_b[2];
 
   // ---- [6-8] 投影重力（body frame）---------------------------------------
   const Eigen::Vector3f pg = projectedGravity(state.imu_quat);
@@ -205,31 +216,47 @@ Eigen::VectorXf PolicyController::buildObservation(const RobotState& state) cons
   obs[idx++] = pg[1];
   obs[idx++] = pg[2];
 
-  // ---- [9-11] 速度指令 (vx, vy, wyaw)------------------------------------
-  obs[idx++] = static_cast<float>(cmd_vx_);
-  obs[idx++] = static_cast<float>(cmd_vy_);
-  obs[idx++] = static_cast<float>(cmd_wyaw_);
+  // ---- [9-11] 速度指令（与 legged_gym 一致：linear cmd × scale_lin_vel，
+  //            yaw cmd × scale_ang_vel）-------------------------------------
+  obs[idx++] = sv * static_cast<float>(cmd_vx_);
+  obs[idx++] = sv * static_cast<float>(cmd_vy_);
+  obs[idx++] = sw * static_cast<float>(cmd_wyaw_);
 
-  // ---- [12-23] 关节角 - 标称角（MuJoCo 顺序: FL,FR,RL,RR）--------------
+  // ---- [12-23] 关节角 - 标称角（乘以 scale_dof_pos）---------------------
+  const float sp = static_cast<float>(cfg_.scale_dof_pos);
   for (int i = 0; i < 12; ++i) {
-    const int qi = 7 + i;  // MuJoCo qpos 偏移 7
+    const int qi = 7 + i;
     const double q = (state.qpos.size() > static_cast<size_t>(qi))
                          ? state.qpos[qi] : 0.0;
-    obs[idx++] = static_cast<float>(q - nominal_joints_[i]);
+    obs[idx++] = sp * static_cast<float>(q - nominal_joints_[i]);
   }
 
-  // ---- [24-35] 关节速度（MuJoCo 顺序）-----------------------------------
+  // ---- [24-35] 关节速度（乘以 scale_dof_vel）----------------------------
+  const float sdv = static_cast<float>(cfg_.scale_dof_vel);
   for (int i = 0; i < 12; ++i) {
-    const int vi = 6 + i;  // MuJoCo qvel 偏移 6
-    obs[idx++] = (state.qvel.size() > static_cast<size_t>(vi))
-                     ? static_cast<float>(state.qvel[vi]) : 0.0f;
+    const int vi = 6 + i;
+    obs[idx++] = sdv * ((state.qvel.size() > static_cast<size_t>(vi))
+                            ? static_cast<float>(state.qvel[vi]) : 0.0f);
   }
 
   // ---- [36-47] 上一时刻 action -------------------------------------------
   for (int i = 0; i < cfg_.action_dim; ++i)
     obs[idx++] = (i < last_action_.size()) ? last_action_[i] : 0.0f;
 
-  return obs;
+  // ---- [48-51] 步态时钟（gait phase clock，周期 0.5 s）-------------------
+  // 必须与训练环境 go2_env.py 中的 GAIT_PERIOD 和 CTRL_DT 保持一致。
+  // phase = 2π × t / GAIT_PERIOD，训练时初相随机化，部署时从 t=0 开始（均在分布内）。
+  static constexpr float kGaitPeriod = 0.5f;
+  const float phase = static_cast<float>(
+      std::fmod(state.time * 2.0 * M_PI / kGaitPeriod, 2.0 * M_PI));
+  obs[idx++] = std::sin(phase);
+  obs[idx++] = std::cos(phase);
+  obs[idx++] = std::sin(phase + static_cast<float>(M_PI));
+  obs[idx++] = std::cos(phase + static_cast<float>(M_PI));
+
+  // 观测截断：防止极端值干扰网络（legged_gym 训练时通常有 clip_observations=100，
+  // 这里收紧到 ±5 以提高鲁棒性）
+  return obs.cwiseMax(-5.0f).cwiseMin(5.0f);
 }
 
 // =========================================================================
@@ -269,7 +296,12 @@ void PolicyController::update(const RobotState& state) {
 
   // --- 构建观测 + 推理 ----------------------------------------------------
   last_obs_ = buildObservation(state);
-  const Eigen::VectorXf action = runInference(last_obs_);
+  Eigen::VectorXf action = runInference(last_obs_);
+
+  // 动作截断：将网络原始输出限制在 [-clip, clip]
+  // legged_gym 默认 clip_actions=100（几乎无截断），这里收紧以防止关节暴走
+  const float clip = 1.0f;
+  action = action.cwiseMax(-clip).cwiseMin(clip);
   last_action_ = action;
 
   // --- 动作 → 关节目标 ---------------------------------------------------

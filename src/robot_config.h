@@ -41,6 +41,15 @@ struct RobotConfig {
   std::vector<double> joint_limits_low;
   std::vector<double> joint_limits_high;
 
+  // ----- 驱动器类型 ---------------------------------------------------------
+  // true  = position 驱动器（ctrl = 目标关节角，MuJoCo 内部做 PD）
+  // false = motor 驱动器（ctrl = 力矩，需要代码层面做 PD 转换）
+  bool uses_position_ctrl = true;
+
+  // motor 驱动器时的 PD 增益（与 Isaac Lab 训练配置对齐）
+  double pd_kp = 20.0;   // Nm/rad
+  double pd_kd =  0.5;   // Nm·s/rad
+
   // ----- 能力标志 -----------------------------------------------------------
   // 是否支持基于规则的 SpotPlanner（仅 Spot 支持）
   bool supports_rule_gait = false;

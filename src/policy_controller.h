@@ -10,7 +10,7 @@
  *   2. 训练完成后调用 loadModel(path) 加载真实模型文件
  *   3. PolicyBackend 是纯虚抽象类，实现它来对接 ONNX/LibTorch 等推理框架
  *
- * 观测向量 (48维，顺序与 Isaac Lab locomotion policy 一致):
+ * 观测向量 (52维，顺序与训练环境 go2_env.py 一致):
  *   [0-2]   body 线速度（body frame, m/s）
  *   [3-5]   body 角速度（body frame, rad/s）
  *   [6-8]   投影重力向量（body frame，单位向量）
@@ -18,6 +18,7 @@
  *   [12-23] 关节角 - 标称角（MuJoCo 顺序: FL,FR,RL,RR 各 3 关节, rad）
  *   [24-35] 关节速度（MuJoCo 顺序, rad/s）
  *   [36-47] 上一时刻输出的 action
+ *   [48-51] 步态时钟 [sin(φ), cos(φ), sin(φ+π), cos(φ+π)]，周期 0.5 s
  *
  * 动作向量 (12维):
  *   q_target[i] = q_nominal[i] + action_scale * action[i]
@@ -78,11 +79,18 @@ class PolicyBackend {
 
 // PolicyController 配置（必须在类声明之前定义，避免 GCC 默认参数限制）
 struct PolicyControllerConfig {
-  int    obs_dim      = 48;    // 观测维度（须与训练时一致）
+  int    obs_dim      = 52;    // 观测维度（须与训练时一致）
   int    action_dim   = 12;    // 动作维度（12个关节）
   double control_dt   = 0.02;  // 控制频率 50Hz（MuJoCo 仍以 1kHz 运行）
-  double action_scale = 0.5;   // 动作缩放系数 (rad/unit)，常见值 0.25~0.5
+  double action_scale = 0.25;  // 动作缩放系数 (rad/unit)，Go2 legged_gym 典型值 0.25
   std::string model_path;      // 模型文件路径（空 = Stub 模式）
+
+  // Isaac Lab / legged_gym 标准观测缩放系数
+  // （训练时对原始值乘以这些系数后输入网络）
+  double scale_lin_vel  = 2.0;   // 线速度缩放
+  double scale_ang_vel  = 0.25;  // 角速度缩放
+  double scale_dof_pos  = 1.0;   // 关节角偏差缩放
+  double scale_dof_vel  = 0.05;  // 关节角速度缩放
 };
 
 class PolicyController {
@@ -191,62 +199,62 @@ class PolicyController {
 };
 
 // =========================================================================
-// ONNX Runtime 后端示例（训练完成后取消注释并实现）
-// 需要在 CMakeLists.txt 中添加:
-//   find_package(onnxruntime REQUIRED)
-//   target_link_libraries(RobotSim PRIVATE onnxruntime::onnxruntime)
+// LibTorch 后端 — 加载 TorchScript (.pt) 模型进行 CPU 推理
+//
+// 使用前需先将 legged_gym checkpoint 导出为 TorchScript：
+//   python3 tools/export_policy.py models/legged_gym/model_300.pt
+// 这会生成 models/legged_gym/actor_300.pt（TorchScript actor-only 模型）
+//
+// CMakeLists.txt 中需添加（USE_TORCH=ON 时自动启用）：
+//   find_package(Torch REQUIRED)
+//   target_link_libraries(RobotSim PRIVATE ${TORCH_LIBRARIES})
 // =========================================================================
-//
-// #include <onnxruntime_cxx_api.h>
-//
-// class OnnxBackend : public PolicyBackend {
-//  public:
-//   bool load(const std::string& path) override {
-//     try {
-//       env_     = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "policy");
-//       session_ = std::make_unique<Ort::Session>(
-//           *env_, path.c_str(), Ort::SessionOptions{});
-//       // 从模型中读取 input/output 名称，或手动指定
-//       Ort::AllocatorWithDefaultOptions alloc;
-//       input_name_buf_  = session_->GetInputNameAllocated(0, alloc);
-//       output_name_buf_ = session_->GetOutputNameAllocated(0, alloc);
-//       input_name_  = input_name_buf_.get();
-//       output_name_ = output_name_buf_.get();
-//       loaded_ = true;
-//       std::cout << "[OnnxBackend] Loaded: " << path << "\n";
-//       return true;
-//     } catch (const Ort::Exception& e) {
-//       std::cerr << "[OnnxBackend] Load failed: " << e.what() << "\n";
-//       return false;
-//     }
-//   }
-//
-//   bool forward(const float* input, int input_dim,
-//                float* output, int output_dim) override {
-//     if (!loaded_) return false;
-//     Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(
-//         OrtArenaAllocator, OrtMemTypeDefault);
-//     std::array<int64_t, 2> in_shape  = {1, input_dim};
-//     std::array<int64_t, 2> out_shape = {1, output_dim};
-//     auto in_tensor  = Ort::Value::CreateTensor<float>(
-//         mem, const_cast<float*>(input), input_dim,
-//         in_shape.data(), in_shape.size());
-//     auto out_tensor = Ort::Value::CreateTensor<float>(
-//         mem, output, output_dim,
-//         out_shape.data(), out_shape.size());
-//     session_->Run(Ort::RunOptions{}, &input_name_, &in_tensor, 1,
-//                   &output_name_, &out_tensor, 1);
-//     return true;
-//   }
-//
-//   bool isLoaded() const override { return loaded_; }
-//
-//  private:
-//   std::unique_ptr<Ort::Env>     env_;
-//   std::unique_ptr<Ort::Session> session_;
-//   Ort::AllocatedStringPtr       input_name_buf_{nullptr};
-//   Ort::AllocatedStringPtr       output_name_buf_{nullptr};
-//   const char* input_name_  = nullptr;
-//   const char* output_name_ = nullptr;
-//   bool loaded_ = false;
-// };
+
+#ifdef USE_TORCH
+#include <torch/script.h>
+
+class TorchBackend : public PolicyBackend {
+ public:
+  bool load(const std::string& path) override {
+    try {
+      module_ = torch::jit::load(path, torch::kCPU);
+      module_.eval();
+      // 禁用梯度计算以加速推理
+      for (auto param : module_.parameters())
+        param.set_requires_grad(false);
+      loaded_ = true;
+      std::cout << "[TorchBackend] Loaded: " << path << "\n";
+      return true;
+    } catch (const c10::Error& e) {
+      std::cerr << "[TorchBackend] Load failed: " << e.what() << "\n";
+      return false;
+    }
+  }
+
+  bool forward(const float* input, int input_dim,
+               float* output, int output_dim) override {
+    if (!loaded_) return false;
+    try {
+      torch::NoGradGuard no_grad;
+      auto in_tensor = torch::from_blob(
+          const_cast<float*>(input),
+          {1, input_dim},
+          torch::kFloat32).clone();
+      auto result = module_.forward({in_tensor}).toTensor();
+      result = result.squeeze(0).contiguous();
+      const int n = std::min(output_dim, static_cast<int>(result.numel()));
+      std::memcpy(output, result.data_ptr<float>(), n * sizeof(float));
+      return true;
+    } catch (const c10::Error& e) {
+      std::cerr << "[TorchBackend] Inference error: " << e.what() << "\n";
+      return false;
+    }
+  }
+
+  bool isLoaded() const override { return loaded_; }
+
+ private:
+  torch::jit::script::Module module_;
+  bool loaded_ = false;
+};
+#endif  // USE_TORCH
