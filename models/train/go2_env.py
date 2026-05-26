@@ -163,30 +163,21 @@ class Go2Env(PipelineEnv):
             + jnp.square(action[5] - action[8])   # FR_calf  = RL_calf
         )
 
-        # Foot air-time reward: encourage trot gait (2 feet in air when moving).
-        # site_xpos indices: IMU=0, FL_foot=1, FR_foot=2, RL_foot=3, RR_foot=4
-        foot_z = pipeline_state.site_xpos[jnp.array([1, 2, 3, 4]), 2]
-        in_contact = foot_z < 0.05  # foot on ground when z < 5 cm
-        n_contact = jnp.sum(in_contact.astype(jnp.float32))
-        # When walking fast: reward having 1–2 feet in air (n_contact = 2 or 3)
-        # When standing still (cmd ≈ 0): reward all 4 feet on ground
-        moving = jnp.abs(command[0]) + jnp.abs(command[1]) + jnp.abs(command[2]) > 0.3
-        r_airtime = 1.0 * jnp.where(
-            moving,
-            jnp.where((n_contact >= 2) & (n_contact <= 3), 1.0, 0.0),
-            jnp.where(n_contact >= 4, 0.5, 0.0),
-        )
-
         # Foot clearance reward: reward each foot for lifting during its designated swing phase.
-        # Uses a continuous sinusoidal weight so any foot lift near the right phase gives reward.
+        # r_airtime removed (exploitable: policy could collect it without real locomotion).
+        # r_foot_clearance is phase-synchronized so harder to exploit — only rewards
+        # lifting the right feet at the right phase, not random hopping.
         # Foot order: FL(0), FR(1), RL(2), RR(3); trot diagonals: FL+RR share phase, FR+RL share phase+π
+        foot_z = pipeline_state.site_xpos[jnp.array([1, 2, 3, 4]), 2]
+        moving = jnp.abs(command[0]) + jnp.abs(command[1]) + jnp.abs(command[2]) > 0.3
         foot_phase_offsets = jnp.array([0.0, jnp.pi, jnp.pi, 0.0])
         foot_phases = phase + foot_phase_offsets
         swing_weight = jnp.maximum(0.0, jnp.sin(foot_phases))  # 0→1, peaks at mid-swing
         foot_z_clipped = jnp.clip(foot_z, 0.0, 0.10)           # clip to reasonable clearance
+        r_airtime = 0.0
         r_foot_clearance = jnp.where(
             moving,
-            2.0 * jnp.sum(swing_weight * foot_z_clipped),
+            0.5 * jnp.sum(swing_weight * foot_z_clipped),
             0.0,
         )
 
