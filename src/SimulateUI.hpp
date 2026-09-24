@@ -30,13 +30,15 @@ enum RightSections {
 // 标准UI定义 - Simulation Section
 // 这些定义复用了simulate库的标准布局
 struct SimulationSection {
-  static mjuiDef* GetDefinition(int* run, double* time_scale) {
+  static mjuiDef* GetDefinition(int* run, double* time_scale, double* ground_friction) {
     static mjuiDef def[] = {
       {mjITEM_SECTION, "Simulation", 2, nullptr, "AS"},
       {mjITEM_RADIO, "", 2, run, "Pause\nRun"},
       {mjITEM_BUTTON, "Reset", 2, nullptr, " #259"},
       {mjITEM_SEPARATOR, "Rule gait speed", 1},
-      {mjITEM_SLIDERNUM, "Scale", 2, time_scale, "0.1 2.0"},
+      {mjITEM_SLIDERNUM, "Scale", 2, time_scale, "0.1 10.0"},
+      {mjITEM_SEPARATOR, "Ground friction", 1},
+      {mjITEM_SLIDERNUM, "Scale", 2, ground_friction, "0.05 2.0"},
       {mjITEM_SEPARATOR, "Controller", 1},
       {mjITEM_BUTTON, "Rules", 2, nullptr, ""},
       {mjITEM_BUTTON, "Policy", 2, nullptr, ""},

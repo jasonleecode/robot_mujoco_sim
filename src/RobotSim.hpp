@@ -45,6 +45,7 @@ class RobotSim {
   int info = 1;             // 左上角信息覆盖层
   int run = 1;              // 1: 运行, 0: 暂停
   double time_scale = 1.0;  // 规则步态速度倍率（物理时间步保持固定）
+  double ground_friction = 1.0;  // 地面摩擦倍率（滑块，等比缩放所有 geom 的切向摩擦）
 
   int check_gravity = 1;
 
@@ -122,6 +123,8 @@ class RobotSim {
   std::atomic<bool> running_{true};
   std::atomic<bool> gravity_enabled_{true};
   std::atomic<double> gait_speed_{1.0};
+  std::atomic<double> ground_friction_scale_{1.0};
+  std::vector<double> base_geom_friction_;  // 各 geom 的原始切向摩擦（构造时保存）
 
   IMUData current_imu;  // 内部缓存
   RobotConfig robot_config_;  // 构造时自动检测

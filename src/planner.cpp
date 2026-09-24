@@ -21,7 +21,8 @@ void SpotPlanner::reset() {
   trot_gait_ = std::make_unique<TrotGait>(&planner_robot_, "");
   trot_gait_->setStanceDuration(kBaseStanceDuration);
   trot_gait_->setSwingHeight(0.035f);
-  setSpeedScale(speed_scale_);
+  effective_speed_scale_ = std::min(1.0, speed_scale_);
+  applySpeedScale(effective_speed_scale_);
   is_fallen_ = false;
   tilt_stopped_ = false;
   initialized_ = false;
@@ -37,17 +38,24 @@ void SpotPlanner::setControlFrequency(double dt) {
 
 void SpotPlanner::setSpeedScale(double scale) {
   if (!std::isfinite(scale)) return;
-  speed_scale_ = std::clamp(scale, 0.1, 2.0);
+  // 只记录目标值；静止起步时由 update() 里的爬升逻辑逐步逼近，
+  // 避免机器人一启动就按高速档的大步幅运动。
+  speed_scale_ = std::clamp(scale, 0.1, 10.0);
+}
+
+void SpotPlanner::applySpeedScale(double scale) {
   // Below half speed a tiny stride is lost to compliant contact and joint
   // tracking error. Keep a 4 cm foot sweep and slow the cadence instead.
   constexpr double min_stride_scale = 0.5;
-  trot_gait_->setStrideScale(std::max(min_stride_scale, speed_scale_));
+  trot_gait_->setStrideScale(std::max(min_stride_scale, scale));
   trot_gait_->setStanceDuration(static_cast<int>(std::lround(
-      kBaseStanceDuration * std::max(1.0, min_stride_scale / speed_scale_))));
-  trot_gait_->setSwingHeight(0.035f * std::clamp(speed_scale_, 0.6, 1.0));
+      kBaseStanceDuration * std::max(1.0, min_stride_scale / scale))));
+  trot_gait_->setSwingHeight(0.035f * std::clamp(scale, 0.6, 1.0));
 }
 
 void SpotPlanner::setMode(control::BasicMotion motion) {
+  const bool leaving_stand =
+      (mode_ == control::BasicMotion::kStand && motion != control::BasicMotion::kStand);
   mode_ = motion;
   tilt_stopped_ = false;
   trot_gait_->setHeadingReference(planner_robot_.getOrientation()[2]);
@@ -55,6 +63,13 @@ void SpotPlanner::setMode(control::BasicMotion motion) {
   // 注意：不在此处重置 is_fallen_，跌倒状态只能通过 reset() 清除。
   // 否则 main 循环检测到 mode 不匹配时会反复调用 setMode，导致警告日志刷屏。
   if (is_fallen_) return;
+
+  // 静止起步：有效速度回到 1.0（目标更低则直接用目标值），
+  // 由 update() 逐步爬升到滑块设定值，实现加速过程。
+  if (leaving_stand) {
+    effective_speed_scale_ = std::min(1.0, speed_scale_);
+    applySpeedScale(effective_speed_scale_);
+  }
 
   if (trot_gait_) {
     trot_gait_->active = true;
@@ -109,6 +124,18 @@ void SpotPlanner::update(const RobotState& state) {
   else last_time_ += ticks * 0.001;
   ticks = std::min(ticks, 100);
 
+  // 起步加速：有效速度按 kSpeedRampRate 向滑块目标值爬升（或回落），
+  // 避免静止起步瞬间拉满大步幅导致踉跄。倾斜保护强制停止期间不爬升。
+  if (mode_ != control::BasicMotion::kStand && !tilt_stopped_ &&
+      effective_speed_scale_ != speed_scale_) {
+    const double delta = kSpeedRampRate * ticks * 0.001;
+    if (effective_speed_scale_ < speed_scale_)
+      effective_speed_scale_ = std::min(speed_scale_, effective_speed_scale_ + delta);
+    else
+      effective_speed_scale_ = std::max(speed_scale_, effective_speed_scale_ - delta);
+    applySpeedScale(effective_speed_scale_);
+  }
+
   // 2. 状态映射 (保持不变)
   mapMujocoToPlanner(state);
 
@@ -147,6 +174,9 @@ void SpotPlanner::update(const RobotState& state) {
       }
       tilt_stopped_ = true;
       trot_gait_->setGaitMotion(GaitMotion::STOP);
+      // 强制停止后再次起步同样从低速爬升
+      effective_speed_scale_ = std::min(1.0, speed_scale_);
+      applySpeedScale(effective_speed_scale_);
     }
   }
 

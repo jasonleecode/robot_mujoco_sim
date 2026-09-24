@@ -72,6 +72,12 @@ RobotSim::RobotSim(const std::string& xml_path) {
     m->geom_friction[geom_id * 3 + 0] = 1.0;
   }
 
+  // 保存各 geom 的原始切向摩擦，摩擦滑块在此基础上等比缩放
+  base_geom_friction_.reserve(m->ngeom);
+  for (int i = 0; i < m->ngeom; ++i) {
+    base_geom_friction_.push_back(m->geom_friction[i * 3 + 0]);
+  }
+
   // --- 3. 自动检测机器人配置（在模型加载后立即进行）---
   robot_config_ = detectRobotConfig(m, xml_path);
   mj_forward(m, d);
@@ -97,7 +103,18 @@ RobotSim::RobotSim(const std::string& xml_path) {
   mjr_defaultContext(&con);
   mjv_makeScene(m, &scn, 2000);
   mjv_makeScene(m, &scn_sensor, 2000);
-  mjr_makeContext(m, &con, mjFONTSCALE_150);
+  // 字号按 DPI 自适应：Retina 等 HiDPI 屏的 framebuffer 是窗口逻辑尺寸的 2 倍，
+  // 需要 150% 字号；普通 96 DPI 屏（framebuffer == window）用 100%，
+  // 否则字体和由文字宽度决定的面板都会显得被放大。
+  int fontscale = mjFONTSCALE_100;
+  {
+    int fb_w = 0, win_w = 0;
+    glfwGetFramebufferSize(window, &fb_w, nullptr);
+    glfwGetWindowSize(window, &win_w, nullptr);
+    const double dpi_ratio = win_w > 0 ? static_cast<double>(fb_w) / win_w : 1.0;
+    if (dpi_ratio >= 1.25) fontscale = mjFONTSCALE_150;
+  }
+  mjr_makeContext(m, &con, fontscale);
 
   glfwSetWindowUserPointer(window, this);
   glfwSetMouseButtonCallback(window, mouse_button);
@@ -138,7 +155,7 @@ void RobotSim::initializeUI() {
   // 使用simulate库的标准UI定义
 
   // Section 1: Simulation - 使用标准定义（带运动控制按钮）
-  mjui_add(&ui0, SimulateUI::SimulationSection::GetDefinition(&run, &time_scale));
+  mjui_add(&ui0, SimulateUI::SimulationSection::GetDefinition(&run, &time_scale, &ground_friction));
 
   // Section 2: Physics - 使用标准定义
   mjui_add(&ui0, SimulateUI::PhysicsSection::GetDefinition(&check_gravity));
@@ -205,6 +222,13 @@ void RobotSim::stepPhysics() {
     m->opt.disableflags &= ~mjDSBL_GRAVITY;  // 开启重力 (清除禁用位)
   } else {
     m->opt.disableflags |= mjDSBL_GRAVITY;  // 关闭重力 (设置禁用位)
+  }
+
+  // 摩擦滑块：等比缩放所有 geom 的切向摩擦（MuJoCo 接触摩擦取双方最大值，
+  // 只改地板会被足底摩擦覆盖，因此整体缩放）
+  const double friction_scale = ground_friction_scale_.load();
+  for (int i = 0; i < m->ngeom; ++i) {
+    m->geom_friction[i * 3 + 0] = base_geom_friction_[i] * friction_scale;
   }
 
   // 速度滑块只调整规则步态，物理步长固定。
@@ -459,6 +483,7 @@ void RobotSim::renderFrame() {
   running_.store(run != 0);
   gravity_enabled_.store(check_gravity != 0);
   gait_speed_.store(time_scale);
+  ground_friction_scale_.store(ground_friction);
 }
 
 void RobotSim::updateInfoText() {

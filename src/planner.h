@@ -57,7 +57,8 @@ class SpotPlanner {
   // 设置控制频率
   void setControlFrequency(double dt);
 
-  // 设置行进速度缩放（常速调步幅，低速保留步幅并降低步频）
+  // 设置目标行进速度缩放（常速调步幅，低速保留步幅并降低步频）。
+  // 静止起步时实际速度从 1.0 平滑爬升到该目标值，不会立即生效。
   void setSpeedScale(double scale);
 
   // 检查是否处于跌倒保护状态
@@ -77,7 +78,10 @@ class SpotPlanner {
 
   control::BasicMotion mode_;
   double last_time_;
-  double speed_scale_ = 1.0;
+  double speed_scale_ = 1.0;             // 滑块设定的目标速度倍率
+  double effective_speed_scale_ = 1.0;   // 实际生效的速度倍率（起步时向目标值爬升）
+  // 起步加速速率：有效速度倍率每秒的变化量上限
+  static constexpr double kSpeedRampRate = 2.0;
   double last_tilt_warn_time_ = -1.0;
   bool initialized_ = false;
   bool tilt_stopped_ = false;
@@ -87,6 +91,9 @@ class SpotPlanner {
   // 辅助：状态映射
   void mapMujocoToPlanner(const RobotState& state);
   void mapPlannerToRef(std::vector<double>& qref);
+
+  // 把速度倍率实际写入步态参数（步幅/支撑相时长/抬脚高度）
+  void applySpeedScale(double scale);
 
   void toEulerAngle(const std::vector<double>& q, double& roll, double& pitch, double& yaw);
 };

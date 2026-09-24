@@ -1,5 +1,5 @@
 // Deterministic integration check using the real Spot model and MuJoCo physics.
-// Usage: HeadlessSim [scene.xml] [forward|backward|left|right|stand|stop|reset|speed|transitions] [scale] [seconds]
+// Usage: HeadlessSim [scene.xml] [forward|backward|left|right|stand|stop|reset|speed|transitions] [scale] [seconds] [friction_scale]
 #include <mujoco/mujoco.h>
 #include <algorithm>
 #include <cmath>
@@ -36,8 +36,11 @@ int main(int argc, char** argv) {
     const std::string scenario = argc > 2 ? argv[2] : "forward";
     const double scale = argc > 3 ? std::stod(argv[3]) : 1.0;
     const double seconds = argc > 4 ? std::stod(argv[4]) : 20.0;
-    require(std::isfinite(scale) && scale >= 0.1 && scale <= 2, "scale must be in [0.1, 2]");
+    const double friction_scale = argc > 5 ? std::stod(argv[5]) : 1.0;
+    require(std::isfinite(scale) && scale >= 0.1 && scale <= 10, "scale must be in [0.1, 10]");
     require(std::isfinite(seconds) && seconds >= 15 && seconds <= 300, "seconds must be in [15, 300]");
+    require(std::isfinite(friction_scale) && friction_scale >= 0.01 && friction_scale <= 2.0,
+            "friction_scale must be in [0.01, 2]");
     const std::vector<std::string> scenarios = {"forward", "backward", "left", "right", "stand", "stop", "reset", "speed", "transitions"};
     require(std::find(scenarios.begin(), scenarios.end(), scenario) != scenarios.end(), "unknown scenario");
     if (const char* plugins = std::getenv("MUJOCO_PLUGIN_DIR")) {
@@ -55,6 +58,8 @@ int main(int argc, char** argv) {
     m->opt.timestep = dt;
     int floor = mj_name2id(m.get(), mjOBJ_GEOM, "floor");
     if (floor >= 0) m->geom_friction[3*floor] = 1.0;
+    // 与 RobotSim 的 Ground friction 滑块一致：等比缩放所有 geom 的切向摩擦
+    for (int i = 0; i < m->ngeom; ++i) m->geom_friction[3*i] *= friction_scale;
     home(m.get(), d.get());
     SpotPlanner planner;
     planner.setControlFrequency(dt);
