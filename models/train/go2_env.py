@@ -35,10 +35,11 @@ NOMINAL_QPOS = jnp.array([
 ])
 
 # Command sampling ranges [vx, vy, wz]
-# Force forward-only to eliminate the stand-still local optimum during initial training
+# Run 13: vy=wz=0 to eliminate free vy/wz reward for standing still;
+# focus entirely on forward velocity before adding lateral/yaw later.
 CMD_LIN_VEL_X = (0.3, 1.0)
-CMD_LIN_VEL_Y = (-0.5, 0.5)
-CMD_ANG_VEL_Z = (-1.0, 1.0)
+CMD_LIN_VEL_Y = (0.0, 0.0)
+CMD_ANG_VEL_Z = (0.0, 0.0)
 
 
 def _quat_rotate_inverse(q: jax.Array, v: jax.Array) -> jax.Array:
@@ -130,38 +131,26 @@ class Go2Env(PipelineEnv):
         ang_vel_b = self._ang_vel_body(pipeline_state)
         proj_grav = self._projected_gravity(pipeline_state)
 
-        # Velocity tracking rewards (kernel=-16: standing still gives only 24% of max reward)
-        r_lin_x = jnp.exp(-16.0 * jnp.square(lin_vel_b[0] - command[0]))
-        r_lin_y = jnp.exp(-16.0 * jnp.square(lin_vel_b[1] - command[1]))
-        r_ang_z = jnp.exp(-16.0 * jnp.square(ang_vel_b[2] - command[2]))
-        r_vel = 2.5 * r_lin_x + 0.5 * r_lin_y + 0.5 * r_ang_z
+        # Velocity tracking: forward-only, full weight on vx.
+        # kernel=-4 (vs -16): at 0.55 m/s error gradient is 9x larger, critical for early learning.
+        r_lin_x = jnp.exp(-4.0 * jnp.square(lin_vel_b[0] - command[0]))
+        r_vel = 3.5 * r_lin_x
 
-        # Stability penalties — strengthened to prevent aggressive/unstable gaits
-        r_roll_pitch = -0.5 * jnp.sum(jnp.square(ang_vel_b[:2]))
+        # Stability penalties — aligned with Isaac Lab RSL coefficients
+        # r_roll_pitch was -0.5 (10x too large); locomotion creates 0.5-1 rad/s body ang_vel
+        # which at -0.5 cost more than the velocity reward gained from walking.
+        r_roll_pitch = -0.05 * jnp.sum(jnp.square(ang_vel_b[:2]))
         r_height = -2.0 * jnp.square(pipeline_state.qpos[2] - 0.27)
         r_action = -0.02 * jnp.sum(jnp.square(action))
         r_action_diff = -0.05 * jnp.sum(jnp.square(action - state.info["last_action"]))
-        r_gravity = -2.0 * jnp.sum(jnp.square(proj_grav[:2]))
-        r_lin_z = -2.0 * jnp.square(pipeline_state.qvel[2])
+        r_gravity = -0.5 * jnp.sum(jnp.square(proj_grav[:2]))
+        r_lin_z = -0.5 * jnp.square(pipeline_state.qvel[2])
         r_dof_vel = -0.001 * jnp.sum(jnp.square(pipeline_state.qvel[6:18]))
 
-        # Structural symmetry for trot gait.
-        # Action order: [FL_hip, FL_thigh, FL_calf, FR_hip, FR_thigh, FR_calf,
-        #                RL_hip, RL_thigh, RL_calf, RR_hip, RR_thigh, RR_calf]
-        #
-        # 1. Hip abduction: always anti-symmetric L/R (holds at every timestep)
-        r_symmetry = -0.05 * (jnp.square(action[0] + action[3])   # FL_hip + FR_hip = 0
-                             + jnp.square(action[6] + action[9]))  # RL_hip + RR_hip = 0
-
-        # 2. Diagonal trot pairing: FL+RR one diagonal, FR+RL the other.
-        #    Thigh and calf within each diagonal pair move in sync.
-        #    (Replaces instantaneous L/R thigh symmetry which contradicts trot anti-phase.)
-        r_diagonal = -0.1 * (
-            jnp.square(action[1] - action[10])   # FL_thigh = RR_thigh
-            + jnp.square(action[2] - action[11])  # FL_calf  = RR_calf
-            + jnp.square(action[4] - action[7])   # FR_thigh = RL_thigh
-            + jnp.square(action[5] - action[8])   # FR_calf  = RL_calf
-        )
+        # Gait structure rewards removed for Run 13 — let the robot discover any
+        # forward-walking strategy first; add symmetry/diagonal constraints later.
+        r_symmetry = 0.0
+        r_diagonal = 0.0
 
         # Foot clearance reward: reward each foot for lifting during its designated swing phase.
         # r_airtime removed (exploitable: policy could collect it without real locomotion).

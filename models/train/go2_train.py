@@ -133,7 +133,7 @@ def train():
     print(f"  envs:     {TRAIN_CFG['num_envs']}")
     print(f"  total_ts: {TRAIN_CFG['num_timesteps']:,}")
     print(f"  policy:   52 → {POLICY_HIDDEN} → 12\n")
-    print(f"  run:      11 (r_airtime=0, r_foot_clearance=0.5 phase-only)\n")
+    print(f"  run:      14 (kernel=-4, vx-only reward, no symmetry/diagonal)\n")
 
     t0 = time.time()
     make_inference_fn, params, metrics = ppo.train(
