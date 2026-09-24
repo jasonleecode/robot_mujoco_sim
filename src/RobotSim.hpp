@@ -90,6 +90,7 @@ class RobotSim {
   void resetPhysics();
   bool simulationRunning() const { return running_.load(); }
   double gaitSpeed() const { return gait_speed_.load(); }
+  double groundFriction() const { return ground_friction_scale_.load(); }
   void applyControlVector(const std::vector<double>& control);
   void getState(RobotState& state) const;
   void setControl(int i, double val);

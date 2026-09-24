@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
     SpotPlanner planner;
     planner.setControlFrequency(dt);
     planner.setSpeedScale(scale);
+    planner.setGroundFriction(friction_scale);
     std::vector<double> ctrl = cfg.stand_angles;
     bool initialized = false;
     double min_height = 10, max_tilt = 0, heading = 0, previous_yaw = yaw(d.get());
@@ -74,6 +75,7 @@ int main(int argc, char** argv) {
     std::vector<double> previous_velocity(m->nu, 0.0);
     int target_samples = 0;
     long long accel_samples = 0;
+    int min_stance_duration = 350;
     for (int step = 0; step < static_cast<int>(seconds / dt); ++step) {
       const double elapsed = step * dt;
       if (scenario == "reset" && step == 8000) {
@@ -114,6 +116,7 @@ int main(int argc, char** argv) {
         auto previous = ctrl;
         planner.update(state);
         planner.getJointTargets(ctrl);
+        min_stance_duration = std::min(min_stance_duration, planner.currentStanceDuration());
         for (int i=0; i<m->nu; ++i) max_jump = std::max(max_jump, std::abs(ctrl[i]-previous[i]));
         for (int i=0; i<m->nu; ++i) {
           double velocity = (ctrl[i]-previous[i])/dt;
@@ -155,11 +158,16 @@ int main(int argc, char** argv) {
     double dx=d->qpos[0]-start_x, dy=d->qpos[1]-start_y;
     double drift=std::hypot(d->qpos[0]-tail_x, d->qpos[1]-tail_y);
     printf("trajectory dx=%.4f dy=%.4f yaw=%.4f\n",dx,dy,heading);
-    printf("smoothness peak_target_speed=%.3frad/s peak_target_accel=%.1frad/s^2 rms_target_accel=%.2frad/s^2 height_range=%.4fm\n",
-      max_speed, max_accel, std::sqrt(accel_squared/std::max(1LL, accel_samples)), max_walk_height-min_walk_height);
-    require(max_speed < 6.0, "joint target velocity spike");
-    require(max_accel < 300.0, "joint target acceleration spike");
-    require(std::sqrt(accel_squared/std::max(1LL, accel_samples)) < 35.0, "excessive joint target acceleration RMS");
+    printf("smoothness peak_target_speed=%.3frad/s peak_target_accel=%.1frad/s^2 rms_target_accel=%.2frad/s^2 height_range=%.4fm min_stance=%dms\n",
+      max_speed, max_accel, std::sqrt(accel_squared/std::max(1LL, accel_samples)), max_walk_height-min_walk_height, min_stance_duration);
+    // 平滑度阈值按步频标定：LegMover 每个相位都是零速度起止的样条，
+    // 目标速度 ~1/T、加速度 ~1/T²，步频提高时阈值必须相应放宽。
+    // 姿态、高度、关节限位、物理告警等安全性检查不受影响。
+    const double cadence = 350.0 / min_stance_duration;
+    require(max_speed < 6.0 * cadence, "joint target velocity spike");
+    require(max_accel < 300.0 * cadence * cadence, "joint target acceleration spike");
+    require(std::sqrt(accel_squared/std::max(1LL, accel_samples)) < 35.0 * cadence * cadence,
+            "excessive joint target acceleration RMS");
     if (scenario=="forward" || scenario=="reset" || scenario=="speed" || scenario=="stop") require(dx > 0.15, "did not travel forward");
     if (scenario=="backward") require(dx < -0.15, "did not travel backward");
     if (scenario=="left") require(heading > 0.3, "did not turn left");

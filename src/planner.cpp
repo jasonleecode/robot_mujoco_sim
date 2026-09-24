@@ -43,13 +43,47 @@ void SpotPlanner::setSpeedScale(double scale) {
   speed_scale_ = std::clamp(scale, 0.1, 10.0);
 }
 
+void SpotPlanner::setGroundFriction(double friction) {
+  if (!std::isfinite(friction)) return;
+  ground_friction_ = std::clamp(friction, 0.01, 2.0);
+  applySpeedScale(effective_speed_scale_);
+}
+
+int SpotPlanner::currentStanceDuration() const {
+  return trot_gait_ ? trot_gait_->getStanceDuration() : kBaseStanceDuration;
+}
+
+double SpotPlanner::strideCapForFriction() const {
+  // 纯步幅策略的实测失效边界（docs/SPEED_LIMIT_ANALYSIS.md），留余量后取值。
+  // 中摩擦上限最高：轻微打滑能吸收落点误差；满摩擦触地"咬死"反而更脆弱。
+  static constexpr double fric[] = {0.05, 0.15, 0.30, 0.50, 0.70, 1.00, 2.00};
+  static constexpr double cap[]  = {1.80, 2.00, 3.00, 3.00, 2.75, 2.50, 2.50};
+  constexpr int n = sizeof(fric) / sizeof(fric[0]);
+  if (ground_friction_ <= fric[0]) return cap[0];
+  if (ground_friction_ >= fric[n - 1]) return cap[n - 1];
+  for (int i = 0; i < n - 1; ++i) {
+    if (ground_friction_ <= fric[i + 1]) {
+      const double t = (ground_friction_ - fric[i]) / (fric[i + 1] - fric[i]);
+      return cap[i] + t * (cap[i + 1] - cap[i]);
+    }
+  }
+  return cap[n - 1];
+}
+
 void SpotPlanner::applySpeedScale(double scale) {
   // Below half speed a tiny stride is lost to compliant contact and joint
   // tracking error. Keep a 4 cm foot sweep and slow the cadence instead.
   constexpr double min_stride_scale = 0.5;
-  trot_gait_->setStrideScale(std::max(min_stride_scale, scale));
-  trot_gait_->setStanceDuration(static_cast<int>(std::lround(
-      kBaseStanceDuration * std::max(1.0, min_stride_scale / scale))));
+  const double cap = strideCapForFriction();
+  const double stride = std::clamp(scale, min_stride_scale, cap);
+  // 目标速度超过步幅封顶时，保持步幅、用提高步频补足；
+  // 步频下限 200 ms 兜底，超过的速度上限自然截断。
+  const double cadence = std::max(1.0, scale / cap);
+  const int duration = std::max(kMinStanceDuration,
+      static_cast<int>(std::lround(
+          kBaseStanceDuration * std::max(1.0, min_stride_scale / scale) / cadence)));
+  trot_gait_->setStrideScale(stride);
+  trot_gait_->setStanceDuration(duration);
   trot_gait_->setSwingHeight(0.035f * std::clamp(scale, 0.6, 1.0));
 }
 

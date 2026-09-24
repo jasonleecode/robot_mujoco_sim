@@ -440,6 +440,8 @@ int main(int argc, char** argv) {
                   planner.setMode(local_motion);
                 // 同步 UI 上的速度缩放到 planner
                 planner.setSpeedScale(robot.gaitSpeed());
+                // 同步地面摩擦，用于步幅封顶与步频自适应
+                planner.setGroundFriction(robot.groundFriction());
                 planner.update(current_state);
                 planner.getJointTargets(control_target);
                 robot.updatePlotData(control_target);

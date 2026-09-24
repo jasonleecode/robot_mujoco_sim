@@ -89,6 +89,11 @@ public:
     void setStanceDuration(int val);
 
     /**
+     * @brief Get the current stance phase duration in milliseconds.
+     */
+    int getStanceDuration() const { return stance_duration; }
+
+    /**
      * @brief Set the depth of the stance phase.
      * @param val Depth in meters.
      */

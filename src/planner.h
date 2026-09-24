@@ -61,6 +61,13 @@ class SpotPlanner {
   // 静止起步时实际速度从 1.0 平滑爬升到该目标值，不会立即生效。
   void setSpeedScale(double scale);
 
+  // 设置地面摩擦倍率（与 UI 的 Ground friction 滑块一致）。
+  // 决定步幅封顶值：超过封顶的速度由提高步频补足。
+  void setGroundFriction(double friction);
+
+  // 当前支撑相时长 (ms)，用于诊断和测试阈值标定
+  int currentStanceDuration() const;
+
   // 检查是否处于跌倒保护状态
   bool isFallen() const {
     return is_fallen_;
@@ -80,8 +87,11 @@ class SpotPlanner {
   double last_time_;
   double speed_scale_ = 1.0;             // 滑块设定的目标速度倍率
   double effective_speed_scale_ = 1.0;   // 实际生效的速度倍率（起步时向目标值爬升）
+  double ground_friction_ = 1.0;         // 地面摩擦倍率（决定步幅封顶）
   // 起步加速速率：有效速度倍率每秒的变化量上限
   static constexpr double kSpeedRampRate = 2.0;
+  // 支撑相最短时长 (ms)：摆动腿完成"抬-跨-落"所需的最小时间
+  static constexpr int kMinStanceDuration = 200;
   double last_tilt_warn_time_ = -1.0;
   bool initialized_ = false;
   bool tilt_stopped_ = false;
@@ -94,6 +104,9 @@ class SpotPlanner {
 
   // 把速度倍率实际写入步态参数（步幅/支撑相时长/抬脚高度）
   void applySpeedScale(double scale);
+
+  // 当前摩擦下的步幅封顶值（实测边界插值，见 docs/SPEED_LIMIT_ANALYSIS.md）
+  double strideCapForFriction() const;
 
   void toEulerAngle(const std::vector<double>& q, double& roll, double& pitch, double& yaw);
 };
