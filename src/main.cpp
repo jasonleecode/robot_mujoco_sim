@@ -43,6 +43,10 @@ struct SharedControlData {
   // Planner 模式下的目标动作
   control::BasicMotion current_motion = control::BasicMotion::kStand;
 
+  // 行进中转向分量：-1=右转, 0=直行, +1=左转。
+  // 与 current_motion 独立，前进/后退时叠加转向，实现边走边转
+  int turn_dir = 0;
+
   // Raw 模式下的关节数据缓存
   std::vector<double> raw_values;
 
@@ -231,8 +235,9 @@ int main(int argc, char** argv) {
       std::lock_guard<std::mutex> lock(shared_data.mutex);
       shared_data.use_planner = true;
       if (motion_type == 0) {
-        // 停止
+        // 停止：回站立模式并清除转向分量
         shared_data.current_motion = control::BasicMotion::kStand;
+        shared_data.turn_dir = 0;
         std::cout << "Motion: Stop (Stand)" << std::endl;
       } else if (motion_type == 1) {
         // 前进
@@ -253,9 +258,28 @@ int main(int argc, char** argv) {
       } else if (motion_type == 4) {
         shared_data.current_motion = control::BasicMotion::kBackward;
       } else if (motion_type == 5) {
-        shared_data.current_motion = control::BasicMotion::kTurnLeft;
+        // 行进中：切换左转向分量（再按一次回正）；静止时：原地左转
+        const bool walking =
+            shared_data.current_motion == control::BasicMotion::kForward ||
+            shared_data.current_motion == control::BasicMotion::kBackward;
+        if (walking) {
+          shared_data.turn_dir = (shared_data.turn_dir == 1) ? 0 : 1;
+          std::cout << "Turn while walking: "
+                    << (shared_data.turn_dir == 1 ? "LEFT" : "straight") << std::endl;
+        } else {
+          shared_data.current_motion = control::BasicMotion::kTurnLeft;
+        }
       } else if (motion_type == 6) {
-        shared_data.current_motion = control::BasicMotion::kTurnRight;
+        const bool walking =
+            shared_data.current_motion == control::BasicMotion::kForward ||
+            shared_data.current_motion == control::BasicMotion::kBackward;
+        if (walking) {
+          shared_data.turn_dir = (shared_data.turn_dir == -1) ? 0 : -1;
+          std::cout << "Turn while walking: "
+                    << (shared_data.turn_dir == -1 ? "RIGHT" : "straight") << std::endl;
+        } else {
+          shared_data.current_motion = control::BasicMotion::kTurnRight;
+        }
       }
     };
 
@@ -324,6 +348,7 @@ int main(int argc, char** argv) {
       bool local_use_planner = true;
       bool local_use_policy  = false;
       control::BasicMotion local_motion = control::BasicMotion::kStand;
+      int local_turn_dir = 0;
       std::vector<double> local_raw_values(num_actuators, 0.0);
 
       bool is_control_active = false;
@@ -354,6 +379,7 @@ int main(int argc, char** argv) {
           {
             std::lock_guard<std::mutex> lock(shared_data.mutex);
             shared_data.current_motion = control::BasicMotion::kStand;
+            shared_data.turn_dir = 0;
             shared_data.use_planner = true;
           }
           std::cout << "Reset: Control state cleared. Restarting homing..." << std::endl;
@@ -371,6 +397,7 @@ int main(int argc, char** argv) {
           local_use_planner = shared_data.use_planner;
           local_use_policy  = shared_data.use_policy_controller;
           local_motion = shared_data.current_motion;
+          local_turn_dir = shared_data.turn_dir;
           if (!local_use_planner) {
             local_raw_values = shared_data.raw_values;
           }
@@ -432,6 +459,7 @@ int main(int argc, char** argv) {
                 // ===== 基于模型的策略控制 =====
                 if (policy.mode() != local_motion)
                   policy.setMode(local_motion);
+                policy.setTurnRate(local_turn_dir);
                 policy.update(current_state);
                 policy.getJointTargets(control_target);
               } else {
@@ -442,6 +470,8 @@ int main(int argc, char** argv) {
                 planner.setSpeedScale(robot.gaitSpeed());
                 // 同步地面摩擦，用于步幅封顶与步频自适应
                 planner.setGroundFriction(robot.groundFriction());
+                // 同步行进中转向分量（边走边转向）
+                planner.setTurnRate(local_turn_dir);
                 planner.update(current_state);
                 planner.getJointTargets(control_target);
                 robot.updatePlotData(control_target);

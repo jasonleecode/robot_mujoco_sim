@@ -194,6 +194,16 @@ Eigen::Vector3d TrotGait::headingAdjustment(int leg) const {
   return Eigen::Vector3d(-angle*y, angle*x, 0.0);
 }
 
+void TrotGait::applyTurnOffset(Eigen::Vector3d& target, bool swing) const {
+  if (turn_scale_ == 0.0) return;
+  // 角步幅与原地转向 turn() 一致：摆动腿 +、支撑腿 -，绕机体中心旋转
+  const double a = turn_scale_ * 0.05 * (swing ? 1.0 : -1.0);
+  const double nx = std::cos(a) * target[0] - std::sin(a) * target[1];
+  const double ny = std::sin(a) * target[0] + std::cos(a) * target[1];
+  target[0] = nx;
+  target[1] = ny;
+}
+
 void TrotGait::forward() {
   // --- 1. 计算所有腿的平衡修正量 ---
   Eigen::Vector3d adj_FR = calculateBalanceAdjustment(robotModel, FR, heading_target_);
@@ -263,6 +273,16 @@ void TrotGait::forward() {
   target_FL_Stance[2] = -NOMINAL_HEIGHT;
   target_RR_Stance[2] = -NOMINAL_HEIGHT;
   target_RL_Stance[2] = -NOMINAL_HEIGHT;
+
+  // --- 4. 行进中转向：叠加弧线步态的角步幅 ---
+  applyTurnOffset(target_FR_Swing, true);
+  applyTurnOffset(target_FL_Swing, true);
+  applyTurnOffset(target_RR_Swing, true);
+  applyTurnOffset(target_RL_Swing, true);
+  applyTurnOffset(target_FR_Stance, false);
+  applyTurnOffset(target_FL_Stance, false);
+  applyTurnOffset(target_RR_Stance, false);
+  applyTurnOffset(target_RL_Stance, false);
 
   switch (phase) {
     case 0:
@@ -334,6 +354,16 @@ void TrotGait::backward() {
   t_RR_St -= headingAdjustment(RR);
   t_RL_Sw += headingAdjustment(RL);
   t_RL_St -= headingAdjustment(RL);
+
+  // 行进中转向：叠加弧线步态的角步幅
+  applyTurnOffset(t_FR_Sw, true);
+  applyTurnOffset(t_FL_Sw, true);
+  applyTurnOffset(t_RR_Sw, true);
+  applyTurnOffset(t_RL_Sw, true);
+  applyTurnOffset(t_FR_St, false);
+  applyTurnOffset(t_FL_St, false);
+  applyTurnOffset(t_RR_St, false);
+  applyTurnOffset(t_RL_St, false);
   switch (phase) {
     case 0:
       if (!legMovers[FR]->swingPhase)

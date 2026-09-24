@@ -16,17 +16,35 @@ const float RobotSim::percentRealTime[] = {100, 80, 66,  50,  40,  33,   25,   2
                                            1.5, 1,  0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0};
 
 RobotSim::RobotSim(const std::string& xml_path) {
-  // --- 1. 图表初始化 ---
+  // --- 1. 图表初始化：四条线共用一个坐标系 ---
   mjv_defaultFigure(&fig);
-  fig.title[0] = '\0';              // 不显示标题（section header 已有）
+  // 关闭内置图例（文字块会挤占曲线区域），颜色映射写进标题
+  strcpy(fig.title, "FR=red FL=green RR=blue RL=yellow");
+  fig.flg_legend = 0;
   fig.xlabel[0] = '\0';             // 不显示 x 轴标签
   fig.flg_ticklabel[0] = 0;         // 隐藏 x 轴刻度数字
-  fig.flg_extend = 1;
+  fig.flg_ticklabel[1] = 0;         // 隐藏内置 y 轴刻度（改用半号字体自绘）
+  fig.flg_extend = 0;
+  // x 轴：mjr_figure 不做滚动，直接按 linedata 里的 x 值显示，
+  // 必须显式设置量程（默认 {0,10} 只显示最旧 10 个点，
+  // 曲线看起来像缓慢漂移的直线）。只显示最新的 400 个点
+  // （10ms 抽稀下 = 4s，约 10 个步态周期），太宽会挤成色带。
+  fig.range[0][0] = (float)(kPlotPoints - 400);
+  fig.range[0][1] = (float)kPlotPoints;
+  // y 轴量程交给渲染器每帧自动拟合（range min>=max 表示自动）。
+  // 不能用 flg_extend：它只扩不收，归位瞬态（0 → -1.8 rad）会把量程
+  // 永久撑大，之后行走时曲线被压成一条细带。
+  fig.range[1][0] = 1.0;
+  fig.range[1][1] = -1.0;
   fig.flg_barplot = 0;
   fig.flg_symmetric = 0;
   fig.linewidth = 2.0f;
   fig.gridsize[0] = 3;
   fig.gridsize[1] = 3;
+  fig.figurergba[0] = 0.0f;
+  fig.figurergba[1] = 0.0f;
+  fig.figurergba[2] = 0.0f;
+  fig.figurergba[3] = 1.0f;
 
   strcpy(fig.linename[0], "FR");
   strcpy(fig.linename[1], "FL");
@@ -167,7 +185,7 @@ void RobotSim::initializeUI() {
   mjui_add(&ui0, SimulateUI::VisualizationSection::GetDefinition(&opt));
 
   // Section 5: Gait Analysis - 自定义图表区域（每个占位符约6px高度）
-  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 50);
+  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 45);
 
   // 默认展开所有section
   for (int i = 0; i < ui0.nsect; i++) {
@@ -181,8 +199,8 @@ void RobotSim::initializeUI() {
   mjui_add(&ui1, defJoints);
   SimulateUI::AddJointSliders(&ui1, m, d);
 
-  // Section 2: Camera View - 相机预览区域（每个占位符约6px高度）
-  SimulateUI::AddPlaceholders(&ui1, "Camera View", 45);
+  // Section 2: Camera View - 相机预览区域（每个占位符约6px高度，上下布局需要更高）
+  SimulateUI::AddPlaceholders(&ui1, "Camera View", 70);
 
   // 默认展开所有section
   for (int i = 0; i < ui1.nsect; i++) {
@@ -376,14 +394,16 @@ void RobotSim::renderFrame() {
       }
 
       if (graph_rect.width > 0 && graph_rect.height > 20) {
-        fig.figurergba[0] = 0.0f;
-        fig.figurergba[1] = 0.0f;
-        fig.figurergba[2] = 0.0f;
-        fig.figurergba[3] = 1.0f;
-        fig.flg_extend = 1;
-        fig.flg_barplot = 0;
         std::lock_guard<std::mutex> lock(sim_mutex);
-        mjr_figure(graph_rect, &fig, &con);
+        // 左侧给半号 y 刻度标签预留宽度，避免文字被面板边缘裁剪
+        mjrRect fig_rect = graph_rect;
+        const int ylabel_w = 24;
+        fig_rect.left += ylabel_w;
+        fig_rect.width -= ylabel_w;
+        if (fig_rect.width > 0) {
+          mjr_figure(fig_rect, &fig, &con);
+          drawSmallYTicks(fig_rect, viewport);
+        }
       }
     }
   }
@@ -457,7 +477,9 @@ void RobotSim::renderFrame() {
           cv::cvtColor(rgb_u, rgb_bgr, cv::COLOR_RGB2BGR);
 
           cv::Mat combo;
-          cv::hconcat(std::vector<cv::Mat>{depth_c, rgb_bgr}, combo);
+          // 上下布局：结尾还有一次垂直翻转（适配 OpenGL），
+          // 所以这里 RGB 在上、深度在下，显示出来是深度在上、RGB 在下
+          cv::vconcat(std::vector<cv::Mat>{rgb_bgr, depth_c}, combo);
 
           cv::Mat final_img;
           cv::resize(combo, final_img, cv::Size(img_rect.width, img_rect.height));
@@ -709,6 +731,11 @@ void RobotSim::updatePlotData(const std::vector<double>& qref) {
   if (qref.size() < 12)
     return;
   std::lock_guard<std::mutex> lock(sim_mutex);
+  // 抽稀采样：物理循环 1kHz，每 10ms 记录一点，
+  // 1000 点 = 10s 时间窗口，否则窗口太小曲线被压成直线
+  if (++plot_decim_cnt < 10)
+    return;
+  plot_decim_cnt = 0;
   int p_idx = plot_idx % kPlotPoints;
   plot_data[0][p_idx] = (float)qref[2];
   plot_data[1][p_idx] = (float)qref[5];
@@ -722,6 +749,47 @@ void RobotSim::updatePlotData(const std::vector<double>& qref) {
       fig.linedata[line][2 * k + 1] = plot_data[line][history_idx];
     }
   }
+}
+
+// 以半号字体绘制 y 轴幅度刻度。mjr_figure 的刻度字体与全局 UI 字号绑定，
+// 无法单独缩小，这里用 glPixelZoom(0.5) 自绘；字符间距手动累加，
+// 因为 glPixelZoom 不会缩放 glBitmap 的光栅位移。
+void RobotSim::drawSmallYTicks(const mjrRect& rect, const mjrRect& fb) {
+  float y0 = fig.yaxisdata[0], y1 = fig.yaxisdata[1];
+  int px0 = fig.yaxispixel[0], px1 = fig.yaxispixel[1];
+  if (!(y1 > y0) || px1 <= px0)
+    return;
+  int n = mjMIN(20, fig.gridsize[1]);
+  if (n < 2)
+    return;
+
+  glViewport(0, 0, fb.width, fb.height);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(0, fb.width, 0, fb.height, -1, 1);
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_LIGHTING);
+  glPixelZoom(0.5f, 0.5f);
+  glColor3f(fig.textrgb[0], fig.textrgb[1], fig.textrgb[2]);
+
+  for (int i = 0; i < n; i++) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.3g", y0 + (y1 - y0) * i / (float)(n - 1));
+    int w = 0;
+    for (const char* p = buf; *p; p++)
+      w += con.charWidth[(unsigned char)*p];
+    float x = rect.left - 4.0f - 0.5f * w;  // 右对齐到绘图区左缘
+    float y = px0 + (px1 - px0) * i / (float)(n - 1) - 0.25f * con.charHeight;
+    for (const char* p = buf; *p; p++) {
+      glRasterPos2f(x, y);
+      glListBase(con.baseFontNormal);
+      glCallLists(1, GL_UNSIGNED_BYTE, p);
+      x += 0.5f * con.charWidth[(unsigned char)*p];
+    }
+  }
+  glPixelZoom(1.0f, 1.0f);
 }
 
 void RobotSim::getIMUDataInternal(IMUData& data, const std::string& prefix) {

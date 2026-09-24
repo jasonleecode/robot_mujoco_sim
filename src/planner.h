@@ -65,6 +65,10 @@ class SpotPlanner {
   // 决定步幅封顶值：超过封顶的速度由提高步频补足。
   void setGroundFriction(double friction);
 
+  // 设置行进中转向分量：-1=右满舵, 0=直行, +1=左满舵。
+  // 叠加在前进/后退上，实现边走边转向；与 mode 相互独立。
+  void setTurnRate(double rate);
+
   // 当前支撑相时长 (ms)，用于诊断和测试阈值标定
   int currentStanceDuration() const;
 
@@ -88,6 +92,7 @@ class SpotPlanner {
   double speed_scale_ = 1.0;             // 滑块设定的目标速度倍率
   double effective_speed_scale_ = 1.0;   // 实际生效的速度倍率（起步时向目标值爬升）
   double ground_friction_ = 1.0;         // 地面摩擦倍率（决定步幅封顶）
+  double turn_rate_ = 0.0;               // 行进中转向分量 (-1..1)
   // 起步加速速率：有效速度倍率每秒的变化量上限
   static constexpr double kSpeedRampRate = 2.0;
   // 支撑相最短时长 (ms)：摆动腿完成"抬-跨-落"所需的最小时间

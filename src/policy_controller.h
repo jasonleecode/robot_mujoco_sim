@@ -125,6 +125,9 @@ class PolicyController {
   /** 设置运动模式，自动映射到速度指令。 */
   void setMode(control::BasicMotion motion);
 
+  /** 设置行进中转向分量：-1=右满舵, 0=直行, +1=左满舵。与 setMode 独立。 */
+  void setTurnRate(double rate);
+
   /** 直接设置速度指令（比 setMode 更精细）。 */
   void setCommand(double vx, double vy, double wyaw);
 
@@ -177,6 +180,10 @@ class PolicyController {
   double cmd_vx_   = 0.0;
   double cmd_vy_   = 0.0;
   double cmd_wyaw_ = 0.0;
+  double turn_rate_ = 0.0;   // 行进中转向分量 (-1..1)
+
+  // 根据 mode_ 和 turn_rate_ 合成速度指令
+  void applyCommand();
 
   // 历史状态
   Eigen::VectorXf last_action_;   // 上一时刻的 action（作为下一步观测）

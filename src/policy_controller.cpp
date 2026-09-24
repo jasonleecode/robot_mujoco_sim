@@ -130,12 +130,23 @@ void PolicyController::setCommand(double vx, double vy, double wyaw) {
 
 void PolicyController::setMode(control::BasicMotion motion) {
   mode_ = motion;
-  switch (motion) {
+  applyCommand();
+}
+
+void PolicyController::setTurnRate(double rate) {
+  if (!std::isfinite(rate)) return;
+  turn_rate_ = std::clamp(rate, -1.0, 1.0);
+  applyCommand();
+}
+
+void PolicyController::applyCommand() {
+  const double wyaw = turn_rate_ * kTurnWyaw;
+  switch (mode_) {
     case control::BasicMotion::kForward:
-      setCommand(kForwardVx, 0.0, 0.0);
+      setCommand(kForwardVx, 0.0, wyaw);
       break;
     case control::BasicMotion::kBackward:
-      setCommand(kBackwardVx, 0.0, 0.0);
+      setCommand(kBackwardVx, 0.0, wyaw);
       break;
     case control::BasicMotion::kTurnLeft:
       setCommand(0.0, 0.0,  kTurnWyaw);
@@ -337,6 +348,7 @@ void PolicyController::reset() {
   mode_     = control::BasicMotion::kDefault;
   is_fallen_ = false;
   last_time_ = -1.0;
+  turn_rate_ = 0.0;
   last_action_.setZero();
   last_obs_.setZero();
   setCommand(0.0, 0.0, 0.0);

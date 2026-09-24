@@ -54,13 +54,16 @@ class RobotSim {
   int motion_stop = 0;      // 停止按钮
 
   // 运动控制回调（由main.cpp设置）
-  std::function<void(int)> motion_callback;  // 参数：0=stop, 1=forward
+  std::function<void(int)> motion_callback;  // 0=stop 1=forward 4=backward 5/6=转向(行进中为叠加转向)
 
-  // 图表数据
+  // 图表数据：四条腿曲线画在同一坐标系，方便对比各腿相位。
+  // 注意：内置图例（FR/FL/RR/RL 文字块）会挤占曲线区域，
+  // 因此关闭图例，颜色映射写进标题。
   mjvFigure fig;
   mjrRect fig_rect = {0, 0, 0, 0};
   float plot_data[4][1000] = {};
   int plot_idx = 0;
+  int plot_decim_cnt = 0;  // 抽稀计数：每 10 个物理步记录一点（10s 窗口）
   const int kPlotPoints = 1000;
 
   // 截图请求
@@ -148,6 +151,7 @@ class RobotSim {
   void getIMUDataInternal(IMUData& data, const std::string& sensor_name_prefix);
 
   void uiModify(mjUI* ui, mjuiState* state, mjrContext* con);
+  void drawSmallYTicks(const mjrRect& rect, const mjrRect& fb);
 
   // 静态回调
   static void mouse_button(GLFWwindow* window, int button, int action, int mods);

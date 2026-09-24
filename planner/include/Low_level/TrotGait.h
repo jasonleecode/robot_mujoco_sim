@@ -116,10 +116,14 @@ public:
     bool active = false;
     void setHeadingReference(double yaw) { heading_target_ = yaw; }
     void setStrideScale(double scale) { stride_scale_ = scale; }
+    // 行进中转向分量：-1=右满舵, 0=直行, +1=左满舵。
+    // 叠加在 forward()/backward() 的落脚目标上，不影响原地转向 turn()。
+    void setTurnScale(double scale) { turn_scale_ = scale; }
 
 private:
     double heading_target_ = 0.0;
     double stride_scale_ = 1.0;
+    double turn_scale_ = 0.0;
 
 public:
 
@@ -163,6 +167,9 @@ private:
     void right();
     void turn(double direction);
     Eigen::Vector3d headingAdjustment(int leg) const;
+    // 把转向分量混入落脚目标：摆动腿向转向侧旋转，支撑腿反向，
+    // 与 turn() 的角步幅一致，使前进/后退可以边走边转向
+    void applyTurnOffset(Eigen::Vector3d& target, bool swing) const;
 
     /**
      * @brief Executes the stand position for the trot gait.

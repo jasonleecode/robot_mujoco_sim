@@ -26,6 +26,7 @@ void SpotPlanner::reset() {
   is_fallen_ = false;
   tilt_stopped_ = false;
   initialized_ = false;
+  turn_rate_ = 0.0;
   last_time_ = 0.0;
   last_tilt_warn_time_ = -1.0;
 }
@@ -47,6 +48,17 @@ void SpotPlanner::setGroundFriction(double friction) {
   if (!std::isfinite(friction)) return;
   ground_friction_ = std::clamp(friction, 0.01, 2.0);
   applySpeedScale(effective_speed_scale_);
+}
+
+void SpotPlanner::setTurnRate(double rate) {
+  if (!std::isfinite(rate)) return;
+  rate = std::clamp(rate, -1.0, 1.0);
+  // 松开转向时锁定当前航向，否则航向保持会把机器人拉回转向前的方向
+  if (rate == 0.0 && turn_rate_ != 0.0 && trot_gait_)
+    trot_gait_->setHeadingReference(planner_robot_.getOrientation()[2]);
+  turn_rate_ = rate;
+  if (trot_gait_)
+    trot_gait_->setTurnScale(rate);
 }
 
 int SpotPlanner::currentStanceDuration() const {
@@ -172,6 +184,11 @@ void SpotPlanner::update(const RobotState& state) {
 
   // 2. 状态映射 (保持不变)
   mapMujocoToPlanner(state);
+
+  // 行进中转向时让航向参考跟随当前航向：headingAdjustment 退化为纯偏航
+  // 阻尼，不会和转向输入对抗；松开转向后由 setTurnRate 锁定新航向。
+  if (turn_rate_ != 0.0 && trot_gait_)
+    trot_gait_->setHeadingReference(planner_robot_.getOrientation()[2]);
 
   // --- [修改] 跌倒检测逻辑 (基于重力投影) ---
   // 目标：检查机器人本体 Z 轴在世界坐标系 Z 轴上的投影分量
