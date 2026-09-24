@@ -65,6 +65,7 @@ public:
     ~BaseGait();
 
     void runStep() {
+        ++curTime;  // one runStep is one simulation millisecond
         this->gaitCallback();
     }
 

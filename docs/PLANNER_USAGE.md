@@ -1,84 +1,59 @@
-# Planner模块使用说明
+# Spot 规则控制
 
-## 如何让机器人向前运动
+从项目根目录构建并运行。默认机器人为 Spot，默认控制方式为 Rules；规则控制不需要模型权重或 LibTorch。
 
-### 当前实现方式
-
-1. **通过DDS发送控制命令**：
-   - 使用工具发送DDS消息，设置：
-     - `mode = kBasic` (CommandMode::kBasic = 1)
-     - `action = kForward` (BasicMotion::kForward = 0)
-
-2. **代码执行流程**：
-   ```
-   main.cpp接收到DDS命令
-   ↓
-   检测到mode=kBasic且action=kForward
-   ↓
-   planner.setMode(kForward)  // 设置planner为前进模式
-   planner_drive = true        // 启用planner控制
-   ↓
-   主循环中：
-   robot.getState(robot_state)    // 获取当前机器人状态
-   planner.update(robot_state)    // 更新planner（计算步态相位）
-   planner.getJointTargets(qref)  // 获取目标关节角度
-   ↓
-   将qref应用到shared_control.values
-   ↓
-   物理线程中应用控制量到机器人
-   ```
-
-### 代码位置
-
-- **命令接收**：`src/main.cpp` 第183-209行
-- **Planner更新**：`src/main.cpp` 第211-218行
-- **步态生成**：`src/planner.cpp` 的 `getJointTargets()` 方法
-
-### 当前步态实现
-
-当前的`SpotPlanner`使用简单的三角函数生成trot步态（对角步态）：
-- **步态频率**：1.5 Hz
-- **步幅**：0.2弧度（可通过speed_multiplier_调整）
-- **抬腿高度**：0.4弧度（可通过speed_multiplier_调整）
-- **相位偏移**：[0.0, 0.5, 0.5, 0.0] 对应 [FL, FR, HL, HR]
-
-### 使用Planner模块改进
-
-planner模块提供了`Robot`类和运动学模型，可以用于更精确的控制：
-
-#### 1. 使用运动学模型计算精确的足端轨迹
-
-```cpp
-#include "Quadruped/Robot.h"
-
-class SpotPlanner {
-    Robot robot_model_;  // planner模块的Robot类
-    
-    void getJointTargets(std::vector<double>& qref) {
-        // 使用Robot类的运动学模型
-        // 1. 定义足端轨迹（基于步态相位）
-        // 2. 使用逆运动学计算关节角度
-        // 3. 设置到robot_model_并获取角度
-    }
-};
+```bash
+cmake -S . -B build -DUSE_TORCH=OFF
+cmake --build build -j 6
+./build/RobotSim
+# 等同于：
+./build/RobotSim robot/boston_dynamics_spot/scene.xml
 ```
 
-#### 2. 使用planner模块的优势
+Linux 或未安装 CycloneDDS 时，配置时增加 `-DUSE_DDS=OFF`。无需 DDS 也能使用窗口按钮和键盘控制。
 
-- **精确的运动学模型**：使用真实的机器人参数
-- **逆运动学求解**：可以基于足端位置计算关节角度
-- **雅可比矩阵**：可以用于速度控制和力控制
-- **关节限制检查**：自动处理关节角度限制
+## 操作
 
-#### 3. 下一步改进方向
+启动后等待约 2 秒归位。
 
-1. **集成Robot类**：在SpotPlanner中使用planner模块的Robot类
-2. **基于足端轨迹的步态**：定义足端的3D轨迹，然后使用逆运动学计算关节角度
-3. **更复杂的步态**：可以使用planner模块实现更多步态模式
+| 操作 | 按钮 / 快捷键 |
+| --- | --- |
+| 前进 | Forward / W |
+| 后退 | Backward / S |
+| 左转、右转 | Turn Left / A、Turn Right / D |
+| 停止并站稳 | Stop / X |
+| 暂停、继续 | Pause / Run、空格 |
+| 回到初始站立姿态 | Reset / Backspace |
+| 规则 / 模型控制 | Rules / Policy |
 
-### 注意事项
+`Rule gait speed` 下的 Scale 范围为 0.1–2.0，数值不是米/秒。0.5–2.0 调节步幅，半步时长保持 350 ms；低于 0.5 时，保留至少 4 cm 的前后足端行程，通过降低步频降速，避免极小步幅被接触形变和关节跟踪误差抵消。0.1 倍速的半步时长为 1750 ms。抬脚高度随速度在 2.1–3.5 cm 范围变化。
 
-- 当前实现使用的是简单的关节空间控制（直接设置关节角度）
-- planner模块的Robot类使用的是Go2机器人的参数，可能和Spot机器人有差异
-- 如需使用planner模块的完整功能，需要适配机器人的参数（腿长、关节限制等）
+物理步长固定为 1 ms，速度变更在下一步轨迹生成时生效。停止会先完成当前迈步，再收回站立姿态，因此低速下停止响应也会更慢。
 
+暂停时物理状态、归位进度和步态相位均停止推进。Reset 在物理线程内恢复 `home` 关键帧，清空规划器、跌倒保护和轨迹状态，并将运动命令恢复为站立。
+
+Policy 保留现有模型推理入口，需要匹配的机器人策略和 `-DUSE_TORCH=ON`。本次修复和验证范围是 Spot 的规则控制；Go1/Go2 不使用 Spot 的规则参数。
+
+## DDS 控制（可选）
+
+```bash
+./build/tools/dds_control_client basic
+```
+
+输入 `forward`、`backward`、`turn_left`、`turn_right` 或 `stand`。规则步态采用足端轨迹、逆运动学和姿态/航向反馈，不依赖学习模型。
+
+## 验证
+
+```bash
+ctest --test-dir build --output-on-failure -j 3
+# 独立运行 30 秒前进测试：
+./build/HeadlessSim robot/boston_dynamics_spot/scene.xml forward 1 30
+```
+
+HeadlessSim 参数为 `场景路径 测试名称 速度倍率 秒数`；测试名称支持 `forward`、`backward`、`left`、`right`、`stand`、`stop`、`reset`、`speed`、`transitions`。时间范围为 15–300 秒。测试使用真实 MuJoCo 动力学，检查运动方向、姿态、关节范围、非有限数值和停止后的漂移；同时检查关节目标速度峰值 < 6 rad/s、加速度峰值 < 300 rad/s²、加速度 RMS < 35 rad/s²，失败返回非零退出码。`transitions` 连续执行前进、后退、左转、右转、前进、停止。
+
+PlannerTest 检查足端跨相位连续性、支撑相末端姿态扰动、切换方向后的对角腿交替、控制接管时目标不跳变，以及暂停、时间回退、重置、不同调用频率、跌倒锁存和非法输入。
+
+步态平滑性修正的测量与限制见 [步态检查记录](GAIT_REVIEW.md)。
+
+验证范围为仓库默认平地场景的上述动作。跳跃、蹲伏和复杂地形不在本次验证范围内。

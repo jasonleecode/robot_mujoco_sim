@@ -129,7 +129,7 @@ RobotConfig detectRobotConfig(const mjModel* m, const std::string& xml_path) {
 
   // --- 能力标志 -------------------------------------------------------------
   // SpotPlanner 仅适用于 Spot：通过 "imu_quat" 传感器存在或名称判断
-  cfg.supports_rule_gait = (cfg.name == "spot") || cfg.has_hardware_imu;
+  cfg.supports_rule_gait = (cfg.name == "spot") && m->nu == 12;
 
   // --- 打印检测结果 ---------------------------------------------------------
   std::cout << "[RobotConfig] Detected robot: \"" << cfg.name << "\"\n"

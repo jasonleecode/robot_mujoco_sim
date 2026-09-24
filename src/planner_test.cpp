@@ -1,81 +1,121 @@
-// Headless planner test: verifies joint target directions during forward gait.
-// Build: g++ -std=c++17 -o /tmp/planner_test src/planner_test.cpp
-//        (not suitable as a standalone build – use CMake target below)
 #include "planner.h"
-#include "ControlActions.hpp"
-#include <cstdio>
-#include <vector>
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
+#include <stdexcept>
+
+void require(bool condition, const char* message) {
+  if (!condition) throw std::runtime_error(message);
+}
+RobotState standing(double time=0) {
+  RobotState s;
+  s.time=time; s.qpos.assign(19,0); s.qvel.assign(18,0);
+  s.qpos[2]=0.445; s.qpos[3]=1;
+  for (int leg=0; leg<4; ++leg) { s.qpos[8+3*leg]=1.04; s.qpos[9+3*leg]=-1.8; }
+  return s;
+}
+std::vector<double> walk(SpotPlanner& p, double start, double dt=0.001) {
+  auto s=standing(start);
+  p.setCurrentState(s); p.setMode(control::BasicMotion::kForward);
+  p.setControlFrequency(dt);
+  for (int i=1; i<=static_cast<int>(0.3/dt); ++i) { s.time=start+i*dt; p.update(s); }
+  std::vector<double> q; p.getJointTargets(q); return q;
+}
+
+void checkFootContinuity() {
+  Robot robot;
+  auto* leg = robot.legs[FR];
+  leg->setAngles(0, 1.04, -1.8);
+  std::vector<double> q = {0, 1.04, -1.8};
+  LegMover mover(leg, q.begin());
+  auto position = [&]() { return leg->getPosition(Eigen::Vector3d(q[0],q[1],q[2])); };
+  Eigen::Vector3d previous = position();
+  Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+  const double z = previous[2];
+  for (int phase=0; phase<4; ++phase) {
+    const bool swing = phase%2 == 1;
+    Eigen::Vector3d target = position();
+    target[0] += swing ? 0.06 : -0.06;
+    target[2] = z;
+    mover.moveLegPosition(target, 350, swing ? SWING : STRAIGHT, 0.035f, 0);
+    for (int tick=0; tick<350; ++tick) {
+      // A changing attitude command, including the last milliseconds of stance.
+      if (!swing) mover.setTargetZ(z + 0.005*std::sin(tick*0.1));
+      mover.mover();
+      Eigen::Vector3d current = position();
+      Eigen::Vector3d next_velocity = (current-previous)/0.001;
+      require(((next_velocity-velocity)/0.001).norm()<30.0,
+              "foot acceleration spike at phase/attitude transition");
+      previous = current;
+      velocity = next_velocity;
+    }
+    require(velocity.norm()<0.01,"foot did not decelerate before phase change");
+    if (swing) require((position()-target).norm()<1e-5,"swing missed its landing target");
+  }
+}
+
+void checkDiagonalAlternation() {
+  Robot robot;
+  TrotGait gait(&robot, "");
+  gait.active = true;
+  gait.setStanceDuration(350);
+  gait.setGaitMotion(FORWARD);
+  gait.runStep();
+  for (int tick=0; tick<350; ++tick) {
+    if (tick==100) gait.setGaitMotion(BACKWARD);
+    for (auto* mover : gait.legMovers) mover->mover();
+    gait.runStep();
+  }
+  require(gait.legMovers[FL]->swingPhase>0 && gait.legMovers[RR]->swingPhase>0,
+          "direction change repeated the same swing diagonal");
+  require(gait.legMovers[FR]->straightPhase>0 && gait.legMovers[RL]->straightPhase>0,
+          "direction change lost its support diagonal");
+}
 
 int main() {
-    SpotPlanner planner;
-    planner.setControlFrequency(0.001);
-
-    // Build a standing state: body at (0,0,0.46), identity orientation, all joints at (0,1.04,-1.8)
-    RobotState state;
-    state.time = 0.0;
-    // qpos: x,y,z, qw,qx,qy,qz, then 12 joint angles
-    state.qpos.resize(19, 0.0);
-    state.qpos[0] = 0.0;  // body x
-    state.qpos[1] = 0.0;  // body y
-    state.qpos[2] = 0.46; // body z
-    state.qpos[3] = 1.0;  // qw (upright)
-    state.qpos[4] = 0.0;  state.qpos[5] = 0.0;  state.qpos[6] = 0.0;
-    // joints: FL, FR, RL, RR each (hx, hy, kn)
-    for (int i = 0; i < 12; ++i) {
-        int j = i % 3;
-        if (j == 0) state.qpos[7+i] = 0.0;
-        else if (j == 1) state.qpos[7+i] = 1.04;
-        else state.qpos[7+i] = -1.8;
-    }
-    // qvel: 6 body dof + 12 joint velocities
-    state.qvel.resize(18, 0.0);
-    // imu: [w,x,y,z]
-    state.imu_quat = {1.0, 0.0, 0.0, 0.0};
-
-    planner.setCurrentState(state);
-
-    // Print initial qTarg
-    std::vector<double> qref(12);
-    planner.getJointTargets(qref);
-    printf("Initial qTarg (FL,FR,RL,RR) hy: %.4f %.4f %.4f %.4f\n",
-           qref[1], qref[4], qref[7], qref[10]);
-
-    // Trigger forward motion
-    planner.setMode(control::BasicMotion::kForward);
-
-    // Run for 500 steps (500ms)
-    double prev_fl_hy = qref[1];
-    double prev_fr_hy = qref[4];
-    double prev_rl_hy = qref[7];
-    double prev_rr_hy = qref[10];
-
-    int last_print = -1;
-    for (int step = 0; step < 800; ++step) {
-        state.time = step * 0.001;
-        planner.update(state);
-        planner.getJointTargets(qref);
-
-        // Print every 50 steps
-        if (step % 50 == 0 || step < 5) {
-            printf("t=%.3f  FL_hy=%.4f(d=%.4f)  FR_hy=%.4f(d=%.4f)"
-                   "  RL_hy=%.4f(d=%.4f)  RR_hy=%.4f(d=%.4f)\n",
-                   state.time,
-                   qref[1], qref[1]-prev_fl_hy,
-                   qref[4], qref[4]-prev_fr_hy,
-                   qref[7], qref[7]-prev_rl_hy,
-                   qref[10], qref[10]-prev_rr_hy);
-            prev_fl_hy = qref[1];
-            prev_fr_hy = qref[4];
-            prev_rl_hy = qref[7];
-            prev_rr_hy = qref[10];
-        }
-    }
-
-    printf("\nFinal qTarg:\n");
-    printf("  FL: hx=%.4f hy=%.4f kn=%.4f\n", qref[0], qref[1], qref[2]);
-    printf("  FR: hx=%.4f hy=%.4f kn=%.4f\n", qref[3], qref[4], qref[5]);
-    printf("  RL: hx=%.4f hy=%.4f kn=%.4f\n", qref[6], qref[7], qref[8]);
-    printf("  RR: hx=%.4f hy=%.4f kn=%.4f\n", qref[9], qref[10], qref[11]);
+  try {
+    checkFootContinuity();
+    checkDiagonalAlternation();
+    SpotPlanner p;
+    auto initial = standing();
+    std::vector<double> command(initial.qpos.begin()+7, initial.qpos.end());
+    for (int i=0; i<12; ++i) command[i] += 0.001*(i+1);
+    p.setCurrentState(initial, command);
+    std::vector<double> seeded;
+    p.getJointTargets(seeded);
+    require(seeded==command,"controller handoff changed the previous joint command");
+    p.reset();
+    auto first=walk(p,0);
+    auto s=standing(0.3);
+    for (int i=0; i<100; ++i) p.update(s);
+    std::vector<double> q; p.getJointTargets(q);
+    require(q==first,"paused simulation advanced the gait");
+    p.reset(); auto after_reset=walk(p,0);
+    require(after_reset==first,"reset did not clear gait/leg/timing state");
+    p.reset(); auto late=walk(p,50);
+    for (int i=0; i<12; ++i) require(std::abs(first[i]-late[i])<1e-9,"floating time offset changes gait rate");
+    p.reset(); auto half_rate=walk(p,0,0.002);
+    for (int i=0; i<12; ++i) require(std::abs(first[i]-half_rate[i])<0.015,"500Hz changes physical gait speed");
+    // A rewind must restart planning immediately, not wait for old time to catch up.
+    p.update(standing(0));
+    p.setMode(control::BasicMotion::kForward);
+    s=standing(.02); p.update(s); p.getJointTargets(q);
+    require(std::abs(q[1]-1.04)>1e-6,"time rewind froze planner");
+    // Fall stays latched until reset even if the caller resends movement.
+    s=standing(.1); s.imu_quat={0.0,1.0,0.0,0.0}; p.update(s);
+    require(p.isFallen(),"fall was not detected");
+    p.setMode(control::BasicMotion::kForward); p.update(standing(.11));
+    require(p.isFallen(),"movement cleared fall latch");
+    p.reset(); require(!p.isFallen(),"reset did not clear fall latch");
+    p.setSpeedScale(std::numeric_limits<double>::quiet_NaN());
+    p.setSpeedScale(std::numeric_limits<double>::infinity());
+    auto valid=walk(p,0);
+    for (double v:valid) require(std::isfinite(v),"invalid speed caused invalid targets");
+    bool rejected=false;
+    try { p.update(RobotState{}); } catch (const std::invalid_argument&) { rejected=true; }
+    require(rejected,"incomplete state was not rejected");
+    puts("PASS foot continuity, diagonal alternation, planner timing, pause, rewind, reset, fall latch and invalid input");
     return 0;
+  } catch (const std::exception& e) { fprintf(stderr,"FAIL: %s\n",e.what()); return 1; }
 }

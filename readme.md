@@ -50,6 +50,8 @@ cmake --build .
 ./build/RobotSim
 ```
 
+默认启动 Spot 的规则控制。W/S 前进后退，A/D 左右转，X 停止，空格暂停，Backspace 重置；也可使用窗口按钮。完整说明与验证命令见 [Spot 规则控制](docs/PLANNER_USAGE.md)。
+
 ### 使用控制工具
 在另一个终端中运行：
 ```bash

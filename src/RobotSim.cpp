@@ -18,14 +18,15 @@ const float RobotSim::percentRealTime[] = {100, 80, 66,  50,  40,  33,   25,   2
 RobotSim::RobotSim(const std::string& xml_path) {
   // --- 1. 图表初始化 ---
   mjv_defaultFigure(&fig);
-  strcpy(fig.title, "Gait Analysis");
-  strcpy(fig.xlabel, "Time");
+  fig.title[0] = '\0';              // 不显示标题（section header 已有）
+  fig.xlabel[0] = '\0';             // 不显示 x 轴标签
+  fig.flg_ticklabel[0] = 0;         // 隐藏 x 轴刻度数字
   fig.flg_extend = 1;
   fig.flg_barplot = 0;
   fig.flg_symmetric = 0;
   fig.linewidth = 2.0f;
-  fig.gridsize[0] = 5;
-  fig.gridsize[1] = 5;
+  fig.gridsize[0] = 3;
+  fig.gridsize[1] = 3;
 
   strcpy(fig.linename[0], "FR");
   strcpy(fig.linename[1], "FL");
@@ -73,6 +74,8 @@ RobotSim::RobotSim(const std::string& xml_path) {
 
   // --- 3. 自动检测机器人配置（在模型加载后立即进行）---
   robot_config_ = detectRobotConfig(m, xml_path);
+  mj_forward(m, d);
+  getIMUDataInternal(current_imu, "imu_");
 
   // --- 4. 初始化 GLFW ---
   if (!glfwInit())
@@ -83,6 +86,11 @@ RobotSim::RobotSim(const std::string& xml_path) {
 
   // --- 4. 初始化 MuJoCo 渲染 ---
   mjv_defaultCamera(&cam);
+  cam.type = mjCAMERA_TRACKING;
+  cam.trackbodyid = m->njnt > 0 ? m->jnt_bodyid[0] : 0;
+  cam.distance = std::max(1.5, 2.0 * m->stat.extent);
+  cam.azimuth = 135;
+  cam.elevation = -20;
   mjv_defaultOption(&opt);
   mjv_defaultScene(&scn);
   mjv_defaultScene(&scn_sensor);
@@ -142,7 +150,7 @@ void RobotSim::initializeUI() {
   mjui_add(&ui0, SimulateUI::VisualizationSection::GetDefinition(&opt));
 
   // Section 5: Gait Analysis - 自定义图表区域（每个占位符约6px高度）
-  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 35);
+  SimulateUI::AddPlaceholders(&ui0, "Gait Analysis", 50);
 
   // 默认展开所有section
   for (int i = 0; i < ui0.nsect; i++) {
@@ -170,11 +178,22 @@ void RobotSim::initializeUI() {
 }
 
 // ---------------- 物理步进 ----------------
+void RobotSim::resetPhysics() {
+  std::lock_guard<std::mutex> lock(sim_mutex);
+  const int home = mj_name2id(m, mjOBJ_KEY, "home");
+  if (home >= 0) mj_resetDataKeyframe(m, d, home);
+  else mj_resetData(m, d);
+  mj_forward(m, d);
+  getIMUDataInternal(current_imu, "imu_");
+  plot_idx = 0;
+  for (auto& line : plot_data) std::fill(std::begin(line), std::end(line), 0.0f);
+}
+
 void RobotSim::stepPhysics() {
   std::lock_guard<std::mutex> lock(sim_mutex);
 
   // 如果暂停且没有单步请求，则返回
-  if (!run)
+  if (!running_.load())
     return;
 
   if (!m || !d)
@@ -182,14 +201,13 @@ void RobotSim::stepPhysics() {
 
   // 应用重力开关逻辑
   // MuJoCo 通过 disableflags 控制特性，设置 mjDSBL_GRAVITY 位表示"禁用重力"
-  if (check_gravity) {
+  if (gravity_enabled_.load()) {
     m->opt.disableflags &= ~mjDSBL_GRAVITY;  // 开启重力 (清除禁用位)
   } else {
     m->opt.disableflags |= mjDSBL_GRAVITY;  // 关闭重力 (设置禁用位)
   }
 
-  // 执行多次步进以匹配 time_scale (简单实现)
-  // 更好的做法是在 main loop 里控制
+  // 速度滑块只调整规则步态，物理步长固定。
   mj_step(m, d);
 
   // 更新 IMU 缓存
@@ -340,6 +358,7 @@ void RobotSim::renderFrame() {
         fig.figurergba[3] = 1.0f;
         fig.flg_extend = 1;
         fig.flg_barplot = 0;
+        std::lock_guard<std::mutex> lock(sim_mutex);
         mjr_figure(graph_rect, &fig, &con);
       }
     }
@@ -437,6 +456,9 @@ void RobotSim::renderFrame() {
 
   glfwSwapBuffers(window);
   glfwPollEvents();
+  running_.store(run != 0);
+  gravity_enabled_.store(check_gravity != 0);
+  gait_speed_.store(time_scale);
 }
 
 void RobotSim::updateInfoText() {
@@ -499,11 +521,17 @@ void RobotSim::handle_mouse_button(int button, int action, int mods) {
       ui_dirty = true;
       // 处理特殊按钮事件
       if (strcmp(it->name, "Reset") == 0) {
-        std::lock_guard<std::mutex> lock(sim_mutex);
-        mj_resetData(m, d);
-        mj_forward(m, d);
-        // 重置时间
-        plot_idx = 0;
+        reset_requested.store(true, std::memory_order_release);
+      } else if (strcmp(it->name, "Rules") == 0) {
+        if (motion_callback) motion_callback(3);
+      } else if (strcmp(it->name, "Policy") == 0) {
+        if (motion_callback) motion_callback(2);
+      } else if (strcmp(it->name, "Backward") == 0) {
+        if (motion_callback) motion_callback(4);
+      } else if (strcmp(it->name, "Turn Left") == 0) {
+        if (motion_callback) motion_callback(5);
+      } else if (strcmp(it->name, "Turn Right") == 0) {
+        if (motion_callback) motion_callback(6);
       } else if (strcmp(it->name, "Forward") == 0) {
         // 前进按钮
         if (motion_callback) {
@@ -625,6 +653,11 @@ void RobotSim::handle_keyboard(int key, int scancode, int act, int mods) {
     return;
 
   switch (key) {
+    case GLFW_KEY_W: if (motion_callback) motion_callback(1); break;
+    case GLFW_KEY_S: if (motion_callback) motion_callback(4); break;
+    case GLFW_KEY_A: if (motion_callback) motion_callback(5); break;
+    case GLFW_KEY_D: if (motion_callback) motion_callback(6); break;
+    case GLFW_KEY_X: if (motion_callback) motion_callback(0); break;
     case GLFW_KEY_F1:
       ui0_enable = !ui0_enable;
       ui_dirty = true;
@@ -641,9 +674,7 @@ void RobotSim::handle_keyboard(int key, int scancode, int act, int mods) {
       ui_dirty = true;
       break;
     case GLFW_KEY_BACKSPACE: {
-      std::lock_guard<std::mutex> lock(sim_mutex);
-      mj_resetData(m, d);
-      mj_forward(m, d);
+      reset_requested.store(true, std::memory_order_release);
     } break;
   }
 }

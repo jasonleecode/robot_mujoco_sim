@@ -30,6 +30,7 @@ if(APPLE)
     message(FATAL_ERROR "MuJoCo framework not found at: ${MUJOCO_FRAMEWORK}")
   endif()
   set(MUJOCO_INCLUDE_DIR "${MUJOCO_FRAMEWORK}/Headers")
+  set(MUJOCO_LIBRARY "${MUJOCO_FRAMEWORK}")
 
   set(CMAKE_BUILD_RPATH "${MUJOCO_DIR}")
   set(CMAKE_INSTALL_RPATH "${MUJOCO_DIR}")
@@ -215,3 +216,16 @@ target_link_libraries(HeadlessSim PRIVATE
     Threads::Threads
     ${ZMQ_LIBRARY}
 )
+
+include(CTest)
+if(BUILD_TESTING)
+  add_test(NAME rule_planner_state COMMAND PlannerTest)
+  foreach(scenario forward backward left right stand stop reset speed transitions)
+    add_test(NAME rule_spot_${scenario} COMMAND HeadlessSim
+      "${CMAKE_CURRENT_SOURCE_DIR}/robot/boston_dynamics_spot/scene.xml" ${scenario} 1 20)
+  endforeach()
+  add_test(NAME rule_spot_slow COMMAND HeadlessSim
+    "${CMAKE_CURRENT_SOURCE_DIR}/robot/boston_dynamics_spot/scene.xml" forward 0.1 20)
+  add_test(NAME rule_spot_fast COMMAND HeadlessSim
+    "${CMAKE_CURRENT_SOURCE_DIR}/robot/boston_dynamics_spot/scene.xml" forward 2 20)
+endif()

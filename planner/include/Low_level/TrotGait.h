@@ -14,7 +14,8 @@
 
 #include <unsupported/Eigen/Splines>
 
-#define REAR_OFFSET -0.02
+// Use the same nominal ground height in swing, stance and stand.
+#define REAR_OFFSET 0.0
 #define SWING_DISTANCE 0.1
 #define DELAY_TIME 20
 
@@ -113,6 +114,14 @@ public:
     ~TrotGait();
 
     bool active = false;
+    void setHeadingReference(double yaw) { heading_target_ = yaw; }
+    void setStrideScale(double scale) { stride_scale_ = scale; }
+
+private:
+    double heading_target_ = 0.0;
+    double stride_scale_ = 1.0;
+
+public:
 
 private:
     Robot *robotModel; /**< Pointer to the Robot object used for managing robot state. */
@@ -152,6 +161,8 @@ private:
      * This method calculates and applies the necessary leg movements for the right turn trot motion.
      */
     void right();
+    void turn(double direction);
+    Eigen::Vector3d headingAdjustment(int leg) const;
 
     /**
      * @brief Executes the stand position for the trot gait.

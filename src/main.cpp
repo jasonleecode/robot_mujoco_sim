@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr char kDefaultModel[] = "robot/unitree_go2/scene.xml";
+constexpr char kDefaultModel[] = "robot/boston_dynamics_spot/scene.xml";
 // 物理循环频率：1000Hz (1ms)
 constexpr double kSimulationDt = 0.001;
 constexpr int kControlMsgSlots = 16;
@@ -202,6 +202,7 @@ int main(int argc, char** argv) {
 
     // 初始化 RobotSim（加载模型时自动检测 RobotConfig）
     RobotSim robot(model_path);
+    robot.m->opt.timestep = kSimulationDt;
     const int num_actuators = robot.getNumActuators();
     const RobotConfig& robot_cfg = robot.getConfig();
     std::cout << "Loaded model '" << model_path << "' with " << num_actuators << " actuators\n";
@@ -226,8 +227,9 @@ int main(int argc, char** argv) {
     shared_data.raw_values.assign(num_actuators, 0.0);
 
     // 设置运动控制回调
-    robot.motion_callback = [&shared_data](int motion_type) {
+    robot.motion_callback = [&shared_data, &robot_cfg](int motion_type) {
       std::lock_guard<std::mutex> lock(shared_data.mutex);
+      shared_data.use_planner = true;
       if (motion_type == 0) {
         // 停止
         shared_data.current_motion = control::BasicMotion::kStand;
@@ -242,8 +244,18 @@ int main(int argc, char** argv) {
         std::cout << "Control mode: Policy (model-based)" << std::endl;
       } else if (motion_type == 3) {
         // 切换回规则步态控制
+        if (!robot_cfg.supports_rule_gait) {
+          std::cerr << "Rule gait is currently available for Spot only.\n";
+          return;
+        }
         shared_data.use_policy_controller = false;
         std::cout << "Control mode: Planner (rule-based)" << std::endl;
+      } else if (motion_type == 4) {
+        shared_data.current_motion = control::BasicMotion::kBackward;
+      } else if (motion_type == 5) {
+        shared_data.current_motion = control::BasicMotion::kTurnLeft;
+      } else if (motion_type == 6) {
+        shared_data.current_motion = control::BasicMotion::kTurnRight;
       }
     };
 
@@ -315,6 +327,8 @@ int main(int argc, char** argv) {
       std::vector<double> local_raw_values(num_actuators, 0.0);
 
       bool is_control_active = false;
+      bool previous_use_planner = true;
+      bool previous_use_policy = false;
       // 归位相关变量：从 home keyframe 启动时仅需很短的稳定时间
       bool is_homing_complete = false;
       const double homing_duration = robot_cfg.supports_rule_gait ? 2.0 : 0.5;
@@ -326,6 +340,31 @@ int main(int argc, char** argv) {
       const auto tick_interval = microseconds(static_cast<int>(kSimulationDt * 1e6));
 
       while (sim_running.load(std::memory_order_acquire)) {
+        // 0. 检查重置请求
+        if (robot.reset_requested.exchange(false, std::memory_order_acq_rel)) {
+          robot.resetPhysics();
+          planner.reset();
+          policy.reset();
+          is_homing_complete = false;
+          is_control_active = false;
+          current_sim_time = 0.0;
+          spawn_qpos.clear();
+          std::fill(control_target.begin(), control_target.end(), 0.0);
+          // 重置运动指令为站立
+          {
+            std::lock_guard<std::mutex> lock(shared_data.mutex);
+            shared_data.current_motion = control::BasicMotion::kStand;
+            shared_data.use_planner = true;
+          }
+          std::cout << "Reset: Control state cleared. Restarting homing..." << std::endl;
+        }
+
+        if (!robot.simulationRunning()) {
+          next_tick = steady_clock::now();
+          std::this_thread::sleep_for(tick_interval);
+          continue;
+        }
+
         // 1. 同步外部指令 (最小化临界区)
         {
           std::lock_guard<std::mutex> lock(shared_data.mutex);
@@ -339,9 +378,17 @@ int main(int argc, char** argv) {
 
         // 2. 获取机器人状态
         robot.getState(current_state);
+        current_sim_time = current_state.time;
+        if (local_use_planner != previous_use_planner || local_use_policy != previous_use_policy) {
+          planner.reset();
+          if (robot_cfg.supports_rule_gait) planner.setCurrentState(current_state, control_target);
+          policy.reset();
+          previous_use_planner = local_use_planner;
+          previous_use_policy = local_use_policy;
+        }
 
         // 记录第一帧的出生姿态
-        if (spawn_qpos.empty() && current_state.qpos.size() >= static_cast<size_t>(num_actuators)) {
+        if (spawn_qpos.empty() && current_state.qpos.size() >= static_cast<size_t>(7 + num_actuators)) {
           spawn_qpos.resize(num_actuators);
           // 注意 MuJoCo qpos offset = 7
           for (int i = 0; i < num_actuators; ++i)
@@ -364,22 +411,19 @@ int main(int argc, char** argv) {
               }
             } else {
               is_homing_complete = true;
-              planner.setCurrentState(current_state);
+              if (robot_cfg.supports_rule_gait) planner.setCurrentState(current_state, control_target);
               std::cout << "Homing Complete. Robot Standing." << std::endl;
             }
-
-            current_sim_time += kSimulationDt;
           }
           // === 阶段二：正常控制逻辑 ===
           else {
-            current_sim_time += kSimulationDt;
             // 对于不支持规则步态的机器人（如 Go2），归位完成后立即激活策略控制器
             if (!is_control_active &&
                 (local_motion != control::BasicMotion::kStand ||
                  !robot_cfg.supports_rule_gait)) {
               std::cout << "Activating controller..." << std::endl;
               is_control_active = true;
-              planner.setCurrentState(current_state);
+              if (robot_cfg.supports_rule_gait) planner.setCurrentState(current_state, control_target);
               policy.reset();
             }
 
@@ -394,6 +438,8 @@ int main(int argc, char** argv) {
                 // ===== 规则步态控制（SpotPlanner，仅 Spot 支持）=====
                 if (planner.mode() != local_motion)
                   planner.setMode(local_motion);
+                // 同步 UI 上的速度缩放到 planner
+                planner.setSpeedScale(robot.gaitSpeed());
                 planner.update(current_state);
                 planner.getJointTargets(control_target);
                 robot.updatePlotData(control_target);
@@ -454,7 +500,7 @@ int main(int argc, char** argv) {
           }
         }
 
-        // 5. 休眠直到下一个时间片
+        // 5. 休眠直到下一个时间片 (保持 1000Hz)
         next_tick += tick_interval;
         std::this_thread::sleep_until(next_tick);
       }

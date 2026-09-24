@@ -16,13 +16,17 @@ LegMover::LegMover(Leg *leg, std::vector<double>::iterator qTarg):
 
 void LegMover::moveLegStraight(Eigen::Vector3d direction, int duration, int phaseOffset)
 {
-    if (duration < 1000/PUB_RATE)
-        duration = 5; // Set to 5 ms
-    waitTime = ((duration / ANGLE_RES) / (1000 / PUB_RATE)) - 1;
+    duration = std::max(duration, (1000 / PUB_RATE) * ANGLE_RES);
+    countDown = 0;
+    waitTime = 0;
     
-    straightPhase = ANGLE_RES;
-   swingPhase = 0;
-    this->straightDirection_d = direction / straightPhase;
+    straightPhase = duration;
+    swingPhase = 0;
+    motionSteps = duration;
+    motionStart = leg->getPosition(get_qTarg());
+    targPos = motionStart + direction;
+    targetZ = targPos[2];
+    targetZVelocity = 0;
     motionType = STRAIGHT;
 }
 
@@ -44,28 +48,31 @@ void LegMover::straightMover()
         return;
     }
 
+    // Critically damp the live height target (omega=50 rad/s). Fade its
+    // motion over the last 20% of stance so a fresh IMU correction cannot
+    // demand a last-tick jump or leave nonzero velocity at the next swing.
+    targetZVelocity += 0.001 * (2500.0*(targetZ-targPos[2])-100.0*targetZVelocity);
+    const double remaining = std::min(1.0, static_cast<double>(straightPhase)/ (0.2*motionSteps));
+    const double fade = remaining*remaining*(3.0-2.0*remaining);
+    targPos[2] += 0.001*fade*targetZVelocity;
     straightPhase--;
-    Eigen::Vector3d curAngles = get_qTarg();
-    // Recompute delta from current qTarg position toward target each step.
-    // This closes the loop and corrects accumulated IK error instead of
-    // replaying a fixed open-loop delta computed at motion start.
-    Eigen::Vector3d curPos = leg->getPosition(curAngles);
-    Eigen::Vector3d remaining = targPos - curPos;
-    // Cap step size to prevent divergence when joint limits create FK errors.
-    // Each step moves at most 4cm in any direction; normal steps are ~1mm.
-    const double kMaxStep = 0.04;
-    if (remaining.norm() > kMaxStep * (straightPhase + 1))
-        remaining = remaining.normalized() * kMaxStep * (straightPhase + 1);
-    Eigen::Vector3d delta = remaining / (straightPhase + 1);
-    curAngles = leg->getKinematics()->jointAngleCompute(curAngles, delta);
-    set_qTarg(leg->enforceJointLim(curAngles));
+    const double t = 1.0 - static_cast<double>(straightPhase) / motionSteps;
+    // Constant support speed with 10% acceleration/deceleration windows.
+    const double ramp = 0.1;
+    auto rampIntegral = [](double u) { return u*u*u*(1.0-0.5*u); };
+    const double blend = t < ramp ? ramp*rampIntegral(t/ramp)/(1.0-ramp)
+        : t > 1.0-ramp ? 1.0-ramp*rampIntegral((1.0-t)/ramp)/(1.0-ramp)
+        : (t-0.5*ramp)/(1.0-ramp);
+    const Eigen::Vector3d target = motionStart + blend*(targPos-motionStart);
+    Eigen::Vector3d angles = get_qTarg();
+    angles = leg->getKinematics()->jointAngleCompute(angles, target-leg->getPosition(angles));
+    set_qTarg(leg->enforceJointLim(angles));
 }
 
 void LegMover::moveLegPosition(Eigen::Vector3d position, int duration,
                                MotionType motionType, float swingHeight, int phaseOffset)
 {
-    auto direction = position - leg->getPosition();
-    targPos = position;
+    const Eigen::Vector3d direction = position - leg->getPosition(get_qTarg());
     switch (motionType)
     {
     case STRAIGHT:
@@ -116,156 +123,40 @@ void LegMover::set_qTarg(Eigen::Vector3d angles)
 
 void LegMover::moveLegSwing(Eigen::Vector3d direction, float swingHeight, int duration, int phaseOffset)
 {
-    
-    // x direction must be greater than 0
-    bool use_x = true;
-    if ((int)(abs(direction[0] * 100)) == 0)
-        use_x = false;
-    if (!use_x)
-        if ((int)(abs(direction[1] * 100)) == 0)
-            return;
-    
-    if (duration < (1000/PUB_RATE) * ANGLE_RES)
-        duration = (1000/PUB_RATE) * ANGLE_RES; // Set to minimum duration
-    swingPhase = ANGLE_RES;
+    duration = std::max(duration, (1000 / PUB_RATE) * ANGLE_RES);
+    swingPhase = duration;
+    motionSteps = duration;
     straightPhase = 0;
-    waitTime = ((duration / ANGLE_RES) / (1000 / PUB_RATE)) - 1;
-
-
-    this->swingDirection_d = direction / ANGLE_RES;
-    // this->swingLegType = legType;
+    countDown = 0;
+    waitTime = 0;
     motionType = SWING;
-
-    // Set orientation/stability control legs
-
-    /* if (legType == FR || legType == RL)
-        curOrientCntrlLeg = FL_RR;
-    else
-        curOrientCntrlLeg = FR_RL;
-    orientTarg = robotModel->getOrientation();
-
-    cntrl1 = curOrientCntrlLeg == FL_RR? FL * JOINT_NUM : FR * JOINT_NUM;
-    cntrl2 = curOrientCntrlLeg == FL_RR? RR * JOINT_NUM : RL * JOINT_NUM;
-
-    cntrlMask[cntrl1] = false;
-    cntrlMask[cntrl2] = false;
-    // lowCmdMsg.motor_cmd[cntrl1].kp = 0;
-    // lowCmdMsg.motor_cmd[cntrl2].kp = 0;
-
-    orientCntrl = true;
- */
-    // Get interpolation points
-    Eigen::VectorXd x(5);
-    Eigen::VectorXd y(5);
-
-    // Use actual joint angles and actual foot position so the swing spline
-    // starts from where the foot really is, not where qTarg thinks it is.
-    Eigen::Vector3d curAngles = leg->getAngles();
-    auto curPos = leg->getPosition();
-
-    
-    auto to_use_x = use_x ? curPos[0] : curPos[1];
-    auto to_use_dir = use_x ? direction[0] : direction[1];
-    // Define swinging profile (Foot trajectory)
-	x <<    to_use_x, // Initial Positions
-            to_use_x + (to_use_dir * 0.15), // 25%
-            to_use_x + (to_use_dir * 0.65), // Mid Positions
-            to_use_x + (to_use_dir * 0.85), // 75%
-            to_use_x + to_use_dir; //Final Positions
-
-    y <<    curPos[2], // Initial Positions
-            // curPos[2] + direction[2] + swingHeight * 0.75, // 75%
-            curPos[2] + (swingHeight * 0.75), // 75%
-            // curPos[2] + direction[2] + swingHeight,// Mid Positions
-            curPos[2] + swingHeight, // Mid Positions
-            // curPos[2] + direction[2] + swingHeight * 0.75, // 75%
-            // curPos[2] + (direction[2] * 0.5), // 75%
-            // curPos[2] + direction[2]; //Final Positions
-            curPos[2] + swingHeight + (direction[2] - swingHeight) * 0.5,
-            curPos[2] + direction[2];
-    curSwing = to_use_x; // To keep track of the current interpolation point in x or y
-    swing_dir = use_x ? 0 : 1; // Swinging in the x:0 or y:1 direction
-
-
-    // Final Position
-    targPos = curPos + direction;
-	
-    
-    // std::cout << "X " << x << std::endl;
-    // std::cout << "Y " << y << std::endl;
-
-	swingSpline = Eigen::SplineFitting<Eigen::Spline<double, 1>>::Interpolate(y.transpose(), 4, x);
-    
-    //std::cout << "I'm here" << std::endl;  
+    // Parameterize by time, not x/y: backward and vertical steps must also
+    // have monotonically increasing interpolation parameters.
+    motionStart = leg->getPosition(get_qTarg());
+    targPos = motionStart + direction;
+    swingLift = swingHeight;
 }
 
 void LegMover::swingMover()
 {
-    if (swingPhase == 0) // Return when the phase is complete
-    {
+    if (swingPhase == 0) {
         countDown = 0;
         motionType = MOTION_TYPE_NUM;
-        
-        //orientCntrl = false;
-
-        /* cntrlMask[cntrl1] = true;
-        cntrlMask[cntrl2] = true;
-        lowCmdMsg.motor_cmd[cntrl1].kp = robotModel->getKps()[cntrl1];
-        lowCmdMsg.motor_cmd[cntrl2].kp = robotModel->getKps()[cntrl2];
-        writeFile = false; */
         return;
     }
-    if (countDown == 0)
-        countDown = waitTime;
-    else
-    {
-        countDown--;
+    if (countDown > 0) {
+        --countDown;
         return;
     }
-
-    swingPhase--;
-    Eigen::Vector3d curAngles = get_qTarg();
-    auto curPos = leg->getPosition(curAngles);
-    curSwing += swingDirection_d[swing_dir];
-    Eigen::RowVectorXd z_interp = swingSpline(curSwing);
-
-    //std::cout << curPos[0] + swingDirection_d[0] << " " << z_interp << std::endl;
-    // Enforce final leg height
-    if (swingPhase == 0)
-    {
-        // curPos = leg->getPosition();
-        swingDirection_d = targPos - curPos;
-        z_interp[0] = targPos[2];
-
-    }
-        
-
-    swingDirection_d[2] = z_interp[0] - curPos[2];
-
-    // std::cout << z_interp[0] << " " << curSwing << std::endl;
-
-    curAngles = leg->getKinematics()->jointAngleCompute(curAngles, swingDirection_d);
-    set_qTarg(leg->enforceJointLim(curAngles));
-    // To be commented out
-    // robotModel->legs[swingLegType]->setAngles(qt[0], qt[1], qt[2]);
-    
-    //
-
-    //std::cout << curPos << std::endl;
-
-    /* modifying = true;
-
-    for (int j = 0; j < JOINT_NUM; j++)
-    {
-        qTarg[curLegPos + j] = qt[j];
-        lowCmdMsg.motor_cmd[curLegPos + j].q = qt[j];
-    } */
-
-    //for (int i = curLegPos, j = 0; i < curLegPos + JOINT_NUM; i++, j++)
-    //    lowCmdMsg.motor_cmd[i].q = legAngles[j];
-
-    // modifying = false;
-    //publishLowCmd();
-
+    countDown = waitTime;
+    --swingPhase;
+    double t = 1.0 - static_cast<double>(swingPhase) / motionSteps;
+    // Quintic travel and sixth-order lift: zero velocity AND acceleration
+    // at both ends, including purely vertical and backward steps.
+    double blend = t*t*t*(10.0 + t*(-15.0 + 6.0*t));
+    Eigen::Vector3d target = motionStart + blend * (targPos - motionStart);
+    target[2] += 64.0 * swingLift * t*t*t * (1.0-t)*(1.0-t)*(1.0-t);
+    Eigen::Vector3d angles = get_qTarg();
+    angles = leg->getKinematics()->jointAngleCompute(angles, target - leg->getPosition(angles));
+    set_qTarg(leg->enforceJointLim(angles));
 }
-

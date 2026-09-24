@@ -96,9 +96,9 @@ public:
      */
     void mover();
 
-    // Continuously update the z component of the target for closed-loop stance correction.
+    // Request a filtered height target for stance attitude correction.
     // Only has effect while straightPhase > 0 (stance motion is active).
-    void setTargetZ(double z) { if (straightPhase > 0) targPos[2] = z; }
+    void setTargetZ(double z) { if (straightPhase > 0) targetZ = z; }
 
 private:
     Leg *leg;                                /**< Pointer to the Leg object associated with this LegMover. */
@@ -113,6 +113,11 @@ private:
     std::vector<double>::iterator leg_qTarg; /**< Iterator to the target joint angles. */
     Eigen::Vector3d cmdTaus;                 /**< Command torques for the leg joints. */
     Eigen::Vector3d targPos;                 /**< Target position for the leg. */
+    Eigen::Vector3d motionStart = Eigen::Vector3d::Zero();
+    double targetZ = 0;
+    double targetZVelocity = 0;
+    double swingLift = 0;
+    int motionSteps = 1;
     double curSwing = 0;                     /**< Current swing height. */
     unsigned int swing_dir = 0;              /**< Direction of the swing. */
     Eigen::Spline<double, 1> swingSpline;    /**< Spline representation of the swing trajectory. */

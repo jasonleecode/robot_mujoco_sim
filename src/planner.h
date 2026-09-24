@@ -1,17 +1,17 @@
 #pragma once
 
 #include <Eigen/Dense>
-#include <memory>  // [新增]
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "ControlActions.hpp"
 
-// [新增] 引入 planner 库的头文件
+// Standalone gait and kinematics.
 #include "Low_level/TrotGait.h"
 #include "Quadruped/Robot.h"
 
-// 定义 RobotState (保持不变)
+// Snapshot from the physics thread.
 struct RobotState {
   std::vector<double> qpos;
   std::vector<double> qvel;
@@ -49,12 +49,16 @@ class SpotPlanner {
   void getJointTargets(std::vector<double>& qref);
 
   // (可选) 兼容旧接口，虽然现在 update 里已经包含了状态设置
-  void setCurrentState(const RobotState& state);
+  // Seed from the actuator's previous command when handing over control so
+  // tracking error is not sent back as an instantaneous target jump.
+  void setCurrentState(const RobotState& state,
+                       const std::vector<double>& commanded_targets = {});
 
   // 设置控制频率
-  void setControlFrequency(double dt) {
-    control_dt_ = dt;
-  }
+  void setControlFrequency(double dt);
+
+  // 设置行进速度缩放（常速调步幅，低速保留步幅并降低步频）
+  void setSpeedScale(double scale);
 
   // 检查是否处于跌倒保护状态
   bool isFallen() const {
@@ -68,10 +72,15 @@ class SpotPlanner {
 
   // [关键] 持有步态算法实例
   std::unique_ptr<TrotGait> trot_gait_;
-  double control_dt_ = 0.002;  // 默认控制频率为 500Hz
+  double control_dt_ = 0.001;  // 默认控制频率为 1000Hz
+  static constexpr int kBaseStanceDuration = 350;  // 基准支撑相时长 (ms)
 
   control::BasicMotion mode_;
   double last_time_;
+  double speed_scale_ = 1.0;
+  double last_tilt_warn_time_ = -1.0;
+  bool initialized_ = false;
+  bool tilt_stopped_ = false;
   // 跌倒标志位
   bool is_fallen_ = false;
 

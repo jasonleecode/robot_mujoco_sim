@@ -44,7 +44,7 @@ class RobotSim {
   int ui1_enable = 1;       // 默认开启右侧
   int info = 1;             // 左上角信息覆盖层
   int run = 1;              // 1: 运行, 0: 暂停
-  double time_scale = 1.0;  // 时间缩放
+  double time_scale = 1.0;  // 规则步态速度倍率（物理时间步保持固定）
 
   int check_gravity = 1;
 
@@ -58,12 +58,15 @@ class RobotSim {
   // 图表数据
   mjvFigure fig;
   mjrRect fig_rect = {0, 0, 0, 0};
-  float plot_data[4][1000];
+  float plot_data[4][1000] = {};
   int plot_idx = 0;
   const int kPlotPoints = 1000;
 
   // 截图请求
   std::atomic<int> screenshotrequest{0};
+
+  // 重置请求（UI线程→物理线程）
+  std::atomic<bool> reset_requested{false};
 
   // UI 脏标记：只在需要时才调用 uiModify
   bool ui_dirty = true;
@@ -83,6 +86,9 @@ class RobotSim {
 
   // --- 物理与控制接口 ---
   void stepPhysics();
+  void resetPhysics();
+  bool simulationRunning() const { return running_.load(); }
+  double gaitSpeed() const { return gait_speed_.load(); }
   void applyControlVector(const std::vector<double>& control);
   void getState(RobotState& state) const;
   void setControl(int i, double val);
@@ -112,6 +118,10 @@ class RobotSim {
   mjvScene scn;
   mjvScene scn_sensor;
   mjvPerturb pert;
+
+  std::atomic<bool> running_{true};
+  std::atomic<bool> gravity_enabled_{true};
+  std::atomic<double> gait_speed_{1.0};
 
   IMUData current_imu;  // 内部缓存
   RobotConfig robot_config_;  // 构造时自动检测

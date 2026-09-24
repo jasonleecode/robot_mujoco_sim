@@ -1,24 +1,15 @@
 #include "planner.h"
 
 #include <cmath>
+#include <algorithm>
+#include <stdexcept>
 #include <iostream>
 
 #include "LegIndexHelper.hpp"
 
 // 构造函数：初始化 planner 库的对象
-SpotPlanner::SpotPlanner() : last_time_(0.0), mode_(control::BasicMotion::kDefault) {
-  // 1. 初始化算法模型
-  // 注意：TrotGait 的构造函数需要 Robot 指针和 nodeName
-  // 在非 ROS 模式下，nodeName 可以为空
-  trot_gait_ = std::make_unique<TrotGait>(&planner_robot_, "");
-
-  // 停止后台定时器：物理线程通过 runStep() 直接驱动步态，不需要定时器线程
-  // 不停止会导致定时器线程与物理线程同时调用 gaitCallback()，产生数据竞争
-  trot_gait_->stopGaitTimer();
-
-  // 2. 初始化一些默认参数 (例如步态频率、高度等)
-  trot_gait_->setStanceDuration(200);
-  trot_gait_->setSwingHeight(0.035f);
+SpotPlanner::SpotPlanner() : mode_(control::BasicMotion::kStand), last_time_(0.0) {
+  reset();
 }
 
 SpotPlanner::~SpotPlanner() {
@@ -26,15 +17,40 @@ SpotPlanner::~SpotPlanner() {
 }
 
 void SpotPlanner::reset() {
-  mode_ = control::BasicMotion::kDefault;
-  trot_gait_->setGaitMotion(GaitMotion::DEFAULT);
-  trot_gait_->active = false;
-  // 重置跌倒状态
+  mode_ = control::BasicMotion::kStand;
+  trot_gait_ = std::make_unique<TrotGait>(&planner_robot_, "");
+  trot_gait_->setStanceDuration(kBaseStanceDuration);
+  trot_gait_->setSwingHeight(0.035f);
+  setSpeedScale(speed_scale_);
   is_fallen_ = false;
+  tilt_stopped_ = false;
+  initialized_ = false;
+  last_time_ = 0.0;
+  last_tilt_warn_time_ = -1.0;
+}
+
+void SpotPlanner::setControlFrequency(double dt) {
+  if (!std::isfinite(dt) || dt < 0.001 || dt > 0.1)
+    throw std::invalid_argument("control period must be between 1 and 100 ms");
+  control_dt_ = dt;
+}
+
+void SpotPlanner::setSpeedScale(double scale) {
+  if (!std::isfinite(scale)) return;
+  speed_scale_ = std::clamp(scale, 0.1, 2.0);
+  // Below half speed a tiny stride is lost to compliant contact and joint
+  // tracking error. Keep a 4 cm foot sweep and slow the cadence instead.
+  constexpr double min_stride_scale = 0.5;
+  trot_gait_->setStrideScale(std::max(min_stride_scale, speed_scale_));
+  trot_gait_->setStanceDuration(static_cast<int>(std::lround(
+      kBaseStanceDuration * std::max(1.0, min_stride_scale / speed_scale_))));
+  trot_gait_->setSwingHeight(0.035f * std::clamp(speed_scale_, 0.6, 1.0));
 }
 
 void SpotPlanner::setMode(control::BasicMotion motion) {
   mode_ = motion;
+  tilt_stopped_ = false;
+  trot_gait_->setHeadingReference(planner_robot_.getOrientation()[2]);
 
   // 注意：不在此处重置 is_fallen_，跌倒状态只能通过 reset() 清除。
   // 否则 main 循环检测到 mode 不匹配时会反复调用 setMode，导致警告日志刷屏。
@@ -71,10 +87,27 @@ void SpotPlanner::setMode(control::BasicMotion motion) {
 
 // 核心：状态同步 -> 步态计算
 void SpotPlanner::update(const RobotState& state) {
-  // 1. 频率控制 (保持不变)
-  if (state.time - last_time_ < control_dt_)
+  if (state.qpos.size() < 19 || state.qvel.size() < 18 || state.imu_quat.size() < 4)
+    throw std::invalid_argument("SpotPlanner requires 12 joints and a floating base");
+  if (!initialized_) {
+    auto requested = mode_;
+    setCurrentState(state);
+    setMode(requested);
     return;
-  last_time_ = state.time;
+  }
+  if (state.time < last_time_ - 1e-9) {
+    reset();
+    setCurrentState(state);
+    return;
+  }
+  if (state.time - last_time_ + 1e-9 < control_dt_) return;
+  // LegMover counters are milliseconds. Advance by simulation time, including
+  // at 500 Hz; floating point roundoff must not skip every other physics tick.
+  int ticks = static_cast<int>(std::floor((state.time - last_time_ + 1e-9) * 1000.0));
+  if (ticks <= 0) return;
+  if (ticks > 100) last_time_ = state.time;
+  else last_time_ += ticks * 0.001;
+  ticks = std::min(ticks, 100);
 
   // 2. 状态映射 (保持不变)
   mapMujocoToPlanner(state);
@@ -85,10 +118,8 @@ void SpotPlanner::update(const RobotState& state) {
 
   // 获取当前四元数 (w, x, y, z)
   // 注意：state.imu_quat 顺序是 [w, x, y, z]
-  double w = state.imu_quat[0];
   double x = state.imu_quat[1];
   double y = state.imu_quat[2];
-  double z = state.imu_quat[3];
 
   // 计算旋转矩阵的 R33 元素 (即 Body-Z 在 World-Z 上的投影)
   // 公式：R33 = 1 - 2*(x^2 + y^2)
@@ -103,19 +134,18 @@ void SpotPlanner::update(const RobotState& state) {
   const double TILT_THRESHOLD = 0.906;  // 25°: 预警阈值，强制切换到站立模式
 
   // 中间倾斜预警：强制停止前进/后退/转向，切换为站立
-  if (z_projection < TILT_THRESHOLD && !is_fallen_) {
+  if (z_projection < TILT_THRESHOLD && !is_fallen_ && !tilt_stopped_) {
     if (mode_ == control::BasicMotion::kForward  ||
         mode_ == control::BasicMotion::kBackward ||
         mode_ == control::BasicMotion::kTurnLeft ||
         mode_ == control::BasicMotion::kTurnRight) {
-      static double last_tilt_warn_time = -1.0;
-      if (state.time - last_tilt_warn_time > 1.0) {
+      if (state.time - last_tilt_warn_time_ > 1.0) {
         printf("[WARNING] Tilt pre-alarm (z_proj=%.3f < %.3f), switching to STAND\n",
                z_projection, TILT_THRESHOLD);
         fflush(stdout);
-        last_tilt_warn_time = state.time;
+        last_tilt_warn_time_ = state.time;
       }
-      mode_ = control::BasicMotion::kStand;
+      tilt_stopped_ = true;
       trot_gait_->setGaitMotion(GaitMotion::STOP);
     }
   }
@@ -144,10 +174,10 @@ void SpotPlanner::update(const RobotState& state) {
   // ------------------------------------------
 
   // 3. 正常步态更新 (保持不变)
-  for (int i = 0; i < 4; ++i) {
-    trot_gait_->legMovers[i]->mover();
+  for (int tick = 0; tick < ticks; ++tick) {
+    for (int i = 0; i < 4; ++i) trot_gait_->legMovers[i]->mover();
+    trot_gait_->runStep();
   }
-  trot_gait_->runStep();
 
   // 4. Continuous stance height correction (runs every control tick, 1kHz).
   // During the stance (STRAIGHT) phase the leg tracks a fixed targPos. While the
@@ -169,7 +199,7 @@ void SpotPlanner::update(const RobotState& state) {
       auto& lm = trot_gait_->legMovers[i];
       if (lm->straightPhase > 0) {
         // roll<0=left down: FL(sign_y=+1) extends → sign_y*negative=negative z ✓
-      double z_corr = sign_y[i] * (roll_cont * k_cont_roll_p + roll_rate_cont * k_cont_roll_d);
+        double z_corr = sign_y[i] * (roll_cont * k_cont_roll_p + roll_rate_cont * k_cont_roll_d);
         z_corr = std::max(-0.05, std::min(0.05, z_corr));
         lm->setTargetZ(nominal_z + z_corr);
       }
@@ -182,10 +212,18 @@ void SpotPlanner::getJointTargets(std::vector<double>& qref) {
   mapPlannerToRef(qref);
 }
 
-void SpotPlanner::setCurrentState(const RobotState& state) {
+void SpotPlanner::setCurrentState(const RobotState& state,
+                                  const std::vector<double>& commanded_targets) {
+  if (!commanded_targets.empty() &&
+      (commanded_targets.size() != 12 ||
+       !std::all_of(commanded_targets.begin(), commanded_targets.end(),
+                    [](double value) { return std::isfinite(value); })))
+    throw std::invalid_argument("initial joint targets must contain 12 finite values");
   mapMujocoToPlanner(state);
-  // Sync qTarg to actual joint angles so the first gait step starts
-  // from the correct position instead of stale default angles.
+  last_time_ = state.time;
+  initialized_ = true;
+  // Continue the last actuator command, or use measured joints when the
+  // caller has no command history.
   for (int planner_idx = 0; planner_idx < 4; ++planner_idx) {
     Eigen::Vector3d actual = planner_robot_.legs[planner_idx]->getAngles();
     int offset = planner_idx * 3;
@@ -193,12 +231,21 @@ void SpotPlanner::setCurrentState(const RobotState& state) {
     trot_gait_->qTarg[offset + 1] = actual[1];
     trot_gait_->qTarg[offset + 2] = actual[2];
   }
+  if (!commanded_targets.empty()) {
+    for (int leg = 0; leg < 4; ++leg) {
+      const int planner_leg = LegIndexHelper::toRobotIndex(leg);
+      for (int joint = 0; joint < 3; ++joint)
+        trot_gait_->qTarg[3*planner_leg+joint] = commanded_targets[3*leg+joint];
+    }
+  }
 }
 
 // --- 辅助映射函数 ---
 
 // MuJoCo (qpos) -> Planner Robot (q, qd)
 void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
+  if (state.qpos.size() < 19 || state.qvel.size() < 18 || state.imu_quat.size() < 4)
+    throw std::invalid_argument("SpotPlanner requires 12 joints and a floating base");
   for (int i = 0; i < 4; ++i) {
     int planner_leg_idx = -1;
     if (i == 0)
@@ -240,7 +287,7 @@ void SpotPlanner::mapMujocoToPlanner(const RobotState& state) {
   // 同步姿态角
   planner_robot_.setOrientation(static_cast<float>(r), static_cast<float>(p), static_cast<float>(y));
 
-  // 同步角速度 (world frame qvel[3..5] = wx,wy,wz，近似等于 body frame 角速度)
+  // 同步角速度 (freejoint qvel[3..5] 是机身坐标系角速度)
   double wx = (state.qvel.size() > 3) ? state.qvel[3] : 0.0;
   double wy = (state.qvel.size() > 4) ? state.qvel[4] : 0.0;
   double wz = (state.qvel.size() > 5) ? state.qvel[5] : 0.0;

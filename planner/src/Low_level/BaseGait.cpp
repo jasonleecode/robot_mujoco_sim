@@ -18,7 +18,8 @@ BodyMover(robotModel, nodeName), robotModel(robotModel)
                                           std::bind(&BaseGait::publishLowCmd, this));
 
 #else
-    gaitTimer_.start(1, std::bind(&BaseGait::gaitCallback, this));
+    // Standalone callers drive runStep() using simulation time. Never start
+    // a virtual callback from this base constructor on a background thread.
 #endif
 }
 
@@ -63,9 +64,15 @@ void BaseGait::setSwingHeight(float val)
 
 void BaseGait::setGaitMotion(GaitMotion val)
 {
-    gaitMotion = val > GAIT_MOTION_NUM? STOP : val;
+    if (val == gaitMotion) return;
+    const auto isWalking = [](GaitMotion motion) {
+        return motion == FORWARD || motion == BACKWARD || motion == LEFT || motion == RIGHT;
+    };
+    const bool keepPhase = isWalking(gaitMotion) && isWalking(val);
+    gaitMotion = val >= GAIT_MOTION_NUM ? STOP : val;
     gaitStartTime = curTime;
-    phase = 0;
+    // Finish the current step and keep alternating diagonals on direction changes.
+    if (!keepPhase) phase = 0;
     // std::cout << "start Time " << startTime << std::endl;
 }
 
